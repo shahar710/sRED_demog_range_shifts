@@ -58,11 +58,62 @@ bioshifts_harmo_intersect=bioshifts_harmo %>%
 ##Bioshift
 ```{r}
 bioshifts_harmo_intersect=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_2_merge_data/bioshifts_harmo_intersect.rds")
+
+biotime_harmo_intersect=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_2_merge_data/biotime_harmo_intersect.rds") %>% #create unique pop and keep esential columns
+  mutate(unique_id=paste(species_harmonized,STUDY_ID,PLOT)) %>% 
+  select(unique_id,
+         species_harmonized,
+         study_id=STUDY_ID,
+         plot=PLOT,
+         year=YEAR,
+         lat=LATITUDE,
+         long=LONGITUDE,
+         abundance=ABUNDANCE)
 ```
 
+#BioTIME cleaning for spatial range outliers
+```{r}
+  biotime_harmo_intersect_spat_cont = biotime_harmo_intersect %>%
+  filter(str_count(species_harmonized, "\\S+") >= 2) %>% #remove only genus species
+  group_by(unique_id,species_harmonized) %>%  # Group by your unique ID
+  # mutate(lat_range = max(lat) - min(lat),  # Calculate latitude range
+  #        long_range = max(long) - min(long)) %>%  # Calculate longitude range
+  # filter(lat_range <= 1 & long_range <= 1) %>%  # Keep only groups with ranges ≤1°
+  mutate(mean_lat_plus_1=mean(lat)+1,
+         mean_lat_minus_1=mean(lat)-1,
+         mean_long_plus_1=mean(long)+1,
+         mean_long_minus_1=mean(long)-1) %>% 
+  filter(between(lat,mean_lat_minus_1,mean_lat_plus_1),
+         between(long,mean_long_minus_1,mean_long_plus_1)) %>% 
+  select(-c(mean_lat_plus_1,mean_lat_minus_1,mean_long_plus_1,mean_long_minus_1)) %>% 
+  # Then filter by minimum observations per year
+  group_by(unique_id, species_harmonized, year) %>%
+  filter(n() >= 3) %>% 
+  group_by(unique_id,species_harmonized) %>% 
+  filter(sum(abundance)>=1,
+         n_distinct(year) >=3) %>% #At least three unique sampled years
+  ungroup()
+```
+
+#Final intersection with bioshifts
+after reducing large latitudinal ranges
+```{r}
+#filter again for bioshifts
+bioshifts_harmo_intersect_spat_cont=bioshifts_harmo_intersect %>% 
+  filter(species_harmonized%in%biotime_harmo_intersect_spat_cont$species_harmonized)
+```
+
+How many fishes?
+```{r}
+bioshifts_harmo_intersect_spat_cont %>% 
+  filter(Class%in%c("Actinopterygii","Chondrichthyes")) %>% 
+  distinct(species_harmonized)
+```
+
+#Plots
 species by ecosystem
 ```{r}
-sp_by_ecosystem=bioshifts_harmo_intersect %>% 
+sp_by_ecosystem=bioshifts_harmo_intersect_spat_cont %>% 
   group_by(Ecosystem) %>% 
   summarise(sp=n_distinct(species_harmonized))
 
@@ -71,13 +122,13 @@ ggplot(sp_by_ecosystem)+
   scale_fill_manual(values = c("Marine" = "skyblue", "Terrestrial" = "#6FB74E"))+
   theme_classic()+
   labs(y="Speices")+
-  scale_y_continuous(breaks=seq(0,3000,by=500))+
+  scale_y_continuous(breaks=seq(0,3000,by=200))+
   guides(fill=F)
 ```
 
 Species by Ecosystem and phyla
 ```{r}
-sp_by_phylum_class=bioshifts_harmo_intersect %>% 
+sp_by_phylum_class=bioshifts_harmo_intersect_spat_cont %>% 
   group_by(Ecosystem,Phylum) %>% 
   summarise(sp=n_distinct(species_harmonized))
 
@@ -87,13 +138,13 @@ ggplot(sp_by_phylum_class)+
   theme_classic()+
   labs(y="Phylum",x="Species")+
   facet_wrap(~Ecosystem, scales = "fixed") + # Create facets for each Ecosystem
-  scale_x_continuous(breaks=seq(0,3000,by=500))+
+  scale_x_continuous(breaks=seq(0,1000,by=150))+
   guides(fill=F)
 ```
 
 Species by Ecosystem and Class
 ```{r}
-sp_by_ecosystem_class=bioshifts_harmo_intersect %>% 
+sp_by_ecosystem_class=bioshifts_harmo_intersect_spat_cont %>% 
   group_by(Ecosystem,Class) %>% 
   summarise(sp=n_distinct(species_harmonized))
 
@@ -103,16 +154,16 @@ ggplot(sp_by_ecosystem_class)+
   theme_classic()+
   labs(y="Class",x="Species")+
   facet_wrap(~Ecosystem, scales = "fixed") +
-  scale_x_continuous(breaks=seq(0,3000,by=500))+
+  scale_x_log10()+
   guides(fill=F)
 ```
 
 Range shift histograms
 ```{r}
-bioshifts_harmo_intersect$Position=factor(bioshifts_harmo_intersect$Position,levels = c("Trailing edge","Centroid","Leading edge"))
-ggplot(bioshifts_harmo_intersect)+
+bioshifts_harmo_intersect_spat_cont$Position=factor(bioshifts_harmo_intersect_spat_cont$Position,levels = c("Trailing edge","Centroid","Leading edge"))
+ggplot(bioshifts_harmo_intersect_spat_cont)+
   geom_histogram(aes(x=ShiftR,fill=Position))+
-  facet_wrap(~Position, scales = "fixed")+
+  facet_grid(Ecosystem~Position, scales = "fixed")+
   geom_vline(linetype="dashed",xintercept = 0)+
   scale_fill_manual(values = c("Trailing edge" = "#E5474B", "Centroid" = "black","Leading edge"="#92BAE3"))+
   theme_bw()+
@@ -121,4 +172,3 @@ ggplot(bioshifts_harmo_intersect)+
   scale_x_continuous(breaks=seq(-50,50,by=20))+
   coord_cartesian(xlim=c(-50,50))
 ```
-
