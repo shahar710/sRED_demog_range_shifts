@@ -1,0 +1,124 @@
+---
+title: "data_overlap_summaries"
+author: "Shahar Chaikin"
+date: "2025-05-05"
+output: html_document
+---
+
+Filter datasets according to the ovelapping species list
+
+Libraries
+```{r}
+library(tidyverse)
+```
+
+Load harmonized datasets
+```{r}
+biotime_harmo=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_1_species_harmo\\biotime_harmo.rds")
+
+bioshifts_harmo=read.csv("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_1_species_harmo\\bioshifts_harmo.csv") %>% 
+  select(-Gradient)
+```
+
+Find species in Bioshifts that are also in BioTIME
+```{r}
+#First apprroach
+#biotime_within_bioshifts_sp_list
+biotime_intersect_bioshifts_sp_list=
+  intersect(bioshifts_harmo$species_harmonized,biotime_harmo$species_harmonized)
+
+#Second apprroach
+biotime_within_bioshifts_sp_list_2=biotime_harmo %>% 
+  filter(species_harmonized%in%bioshifts_harmo$species_harmonized)
+
+biotime_within_bioshifts_sp_list_2$species_harmonized %>% n_distinct()
+
+#Yes, both apprroach converge on 4990 species
+rm(biotime_within_bioshifts_sp_list_2)
+```
+
+Create new subseted datasets according to the new species list
+```{r}
+#Biotime
+biotime_harmo_intersect=biotime_harmo %>% 
+  filter(species_harmonized%in%biotime_intersect_bioshifts_sp_list)
+
+##write
+#write_rds(biotime_harmo_intersect,"biotime_harmo_intersect.rds")
+
+#Bioshifts
+bioshifts_harmo_intersect=bioshifts_harmo %>% 
+  filter(species_harmonized%in%biotime_intersect_bioshifts_sp_list)
+
+##write
+#write_rds(bioshifts_harmo_intersect,"bioshifts_harmo_intersect.rds")
+```
+
+#Read new data and summaries
+##Bioshift
+```{r}
+bioshifts_harmo_intersect=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_2_merge_data/bioshifts_harmo_intersect.rds")
+```
+
+species by ecosystem
+```{r}
+sp_by_ecosystem=bioshifts_harmo_intersect %>% 
+  group_by(Ecosystem) %>% 
+  summarise(sp=n_distinct(species_harmonized))
+
+ggplot(sp_by_ecosystem)+
+  geom_col(aes(x=Ecosystem,y=sp,fill=Ecosystem))+
+  scale_fill_manual(values = c("Marine" = "skyblue", "Terrestrial" = "#6FB74E"))+
+  theme_classic()+
+  labs(y="Speices")+
+  scale_y_continuous(breaks=seq(0,3000,by=500))+
+  guides(fill=F)
+```
+
+Species by Ecosystem and phyla
+```{r}
+sp_by_phylum_class=bioshifts_harmo_intersect %>% 
+  group_by(Ecosystem,Phylum) %>% 
+  summarise(sp=n_distinct(species_harmonized))
+
+ggplot(sp_by_phylum_class)+
+  geom_col(aes(x=sp,y=reorder(Phylum,sp),fill=Ecosystem))+
+  scale_fill_manual(values = c("Marine" = "skyblue", "Terrestrial" = "#6FB74E"))+
+  theme_classic()+
+  labs(y="Phylum",x="Species")+
+  facet_wrap(~Ecosystem, scales = "fixed") + # Create facets for each Ecosystem
+  scale_x_continuous(breaks=seq(0,3000,by=500))+
+  guides(fill=F)
+```
+
+Species by Ecosystem and Class
+```{r}
+sp_by_ecosystem_class=bioshifts_harmo_intersect %>% 
+  group_by(Ecosystem,Class) %>% 
+  summarise(sp=n_distinct(species_harmonized))
+
+ggplot(sp_by_ecosystem_class)+
+  geom_col(aes(x=sp,y=reorder(Class,sp),fill=Ecosystem))+
+  scale_fill_manual(values = c("Marine" = "skyblue", "Terrestrial" = "#6FB74E"))+
+  theme_classic()+
+  labs(y="Class",x="Species")+
+  facet_wrap(~Ecosystem, scales = "fixed") +
+  scale_x_continuous(breaks=seq(0,3000,by=500))+
+  guides(fill=F)
+```
+
+Range shift histograms
+```{r}
+bioshifts_harmo_intersect$Position=factor(bioshifts_harmo_intersect$Position,levels = c("Trailing edge","Centroid","Leading edge"))
+ggplot(bioshifts_harmo_intersect)+
+  geom_histogram(aes(x=ShiftR,fill=Position))+
+  facet_wrap(~Position, scales = "fixed")+
+  geom_vline(linetype="dashed",xintercept = 0)+
+  scale_fill_manual(values = c("Trailing edge" = "#E5474B", "Centroid" = "black","Leading edge"="#92BAE3"))+
+  theme_bw()+
+  labs(x="Range shift velocity (km/ yr)",y="Count")+
+  guides(fill=F)+
+  scale_x_continuous(breaks=seq(-50,50,by=20))+
+  coord_cartesian(xlim=c(-50,50))
+```
+

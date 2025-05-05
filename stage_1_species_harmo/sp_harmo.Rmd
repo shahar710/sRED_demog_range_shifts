@@ -1,0 +1,132 @@
+---
+title: "sp_harmo"
+author: "Shahar Chaikin"
+date: "2025-05-04"
+output: html_document
+---
+
+Here I will harmonize species names within BioTIME 2.0 and BioShifts.
+After that I will inspect how many species appear in both datasets.
+
+libraries
+```{r}
+library(tidyverse)
+```
+
+#1) Bioshifts
+##1.1) Data
+```{r}
+#Bioshifts
+bioshifts_raw=read.csv("C:\\Users\\User\\Desktop\\research\\data\\Bioshifts\\BioShifts.csv")
+```
+
+##1.2) taxa harmonization
+Harmonization of scientific names by correcting spelling errors and converting nomenclatural synonyms to currently accepted names
+```{r}
+# Harmonization_biosh=bdc::bdc_query_names_taxadb(
+#   unique(bioshifts_raw$Species),
+#   suggest_names = T)
+
+#save
+#write.csv(Harmonization_biosh,"Harmonization_biosh.csv",row.names = F)
+
+#read
+Harmonization_biosh=read.csv("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts/stage_1_species_harmo/Harmonization_biosh.csv") %>% 
+  select(-X)
+
+#Species by status
+Harmonization_biosh %>% 
+  group_by(notes) %>% 
+  summarise(species=n())
+
+#Remove species that have uncertain names
+Harmonization_biosh=Harmonization_biosh %>% 
+  filter(!notes %in%c("notFound")) %>% 
+  drop_na(notes,scientificName)
+```
+
+Update files with harmonized species
+```{r}
+#Add harmonized species and gbif key columns
+bioshifts_harmo=bioshifts_raw %>% 
+  left_join(Harmonization_biosh %>% 
+              select(Species=original_search,
+                      species_harmonized=scientificName,
+                      usageKey=acceptedNameUsageID),
+            by="Species") %>% 
+  drop_na(species_harmonized) %>% 
+  filter(Gradient%in%"Latitudinal") #keep only latitudinal gradients
+
+#write.csv(bioshifts_harmo,"bioshifts_harmo.csv",row.names = F)
+```
+
+#2) BioTIME
+##2.1) Data
+```{r}
+#BioTIME 2.0
+biotime_raw=read_rds("C:\\Users\\User\\Desktop\\research\\data\\BioTIME 2\\queryBTv2_April_2024.rds")
+```
+
+##2.2) taxa harmonization
+Harmonization of scientific names by correcting spelling errors and converting nomenclatural synonyms to currently accepted names
+```{r eval=FALSE, include=FALSE}
+#chunk one
+Harmonization_bioti_1=bdc::bdc_query_names_taxadb(
+  unique(biotime_raw$valid_name)[1:10000],
+  suggest_names = T)
+#chunk two
+Harmonization_bioti_2=bdc::bdc_query_names_taxadb(
+  unique(biotime_raw$valid_name)[10001:20000],
+  suggest_names = T)
+#chunk three
+Harmonization_bioti_3=bdc::bdc_query_names_taxadb(
+  unique(biotime_raw$valid_name)[20001:30000],
+  suggest_names = T)
+#chunk four
+Harmonization_bioti_4=bdc::bdc_query_names_taxadb(
+  unique(biotime_raw$valid_name)[30001:40000],
+  suggest_names = T)
+#chunk five
+Harmonization_bioti_5=bdc::bdc_query_names_taxadb(
+  unique(biotime_raw$valid_name)[40001:56496],
+  suggest_names = T)
+
+#bind all chunks
+Harmonization_bioti=bind_rows(Harmonization_bioti_1,
+                              Harmonization_bioti_2,
+                              Harmonization_bioti_3,
+                              Harmonization_bioti_4,
+                              Harmonization_bioti_5)
+
+#save
+write.csv(Harmonization_bioti,"Harmonization_bioti.csv",row.names = F)
+```
+
+Remove species that are nit documented in GBIF
+```{r}
+#read
+Harmonization_bioti=read.csv("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts/stage_1_species_harmo/Harmonization_bioti.csv")
+#Species by status
+Harmonization_bioti %>% 
+  group_by(notes) %>% 
+  summarise(species=n())
+
+#Remove species that have uncertain names
+Harmonization_bioti=Harmonization_bioti %>% 
+  filter(!notes %in%c("notFound")) %>% 
+  drop_na(notes,scientificName)
+```
+
+Update files with harmonized species
+```{r}
+#Add harmonized species and gbif key columns
+biotime_harmo=biotime_raw %>% 
+  left_join(Harmonization_bioti %>% 
+              select(valid_name=original_search,
+                      species_harmonized=scientificName,
+                      usageKey=acceptedNameUsageID),
+            by="valid_name") %>% 
+  drop_na(species_harmonized)
+
+write_rds(biotime_harmo,"biotime_harmo.rds")
+```
