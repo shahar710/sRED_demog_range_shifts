@@ -1,0 +1,84 @@
+---
+title: "extract_gbif_coords"
+author: "Shahar Chaikin"
+date: "2025-05-06"
+output: html_document
+---
+# Load required packages
+```{r}
+library(sf)
+library(dplyr)
+library(purrr)
+```
+
+```{r}
+# Set path to your GDB
+gdb_path <- "C:/Users/User/Desktop/research/data/Bioshifts/Study_Areas.gdb"
+
+# List all layers
+layers <- st_layers(gdb_path)$name
+
+# Enhanced processing function with full error handling
+process_layer <- function(layer_name) {
+  tryCatch({
+    # Read layer with validation
+    sf_obj <- st_read(gdb_path, layer = layer_name, quiet = TRUE) %>%
+      st_make_valid()
+    
+    # Skip if not polygon type
+    if (!any(st_geometry_type(sf_obj) %in% c("POLYGON", "MULTIPOLYGON"))) {
+      return(NULL)
+    }
+    
+    # Process features one by one with error handling
+    map_dfr(1:nrow(sf_obj), function(i) {
+      feature <- sf_obj[i, ]
+      
+      # Skip if geometry is empty
+      if (st_is_empty(feature)) return(NULL)
+      
+      # Make valid and try calculations
+      feature <- st_make_valid(feature)
+      
+      # Calculate area (with fallback)
+      area <- tryCatch(
+        st_area(feature),
+        error = function(e) NA_real_
+      )
+      
+      # Calculate centroid (with fallback to point on surface)
+      centroid <- tryCatch(
+        st_centroid(feature),
+        error = function(e) st_point_on_surface(feature)
+      )
+      
+      # Return results
+      tibble(
+        layer = layer_name,
+        feature_id = i,
+        bioshift_long_cent = st_coordinates(centroid)[1],
+        bioshift_lat_cent = st_coordinates(centroid)[2],
+        area_m2 = as.numeric(area),
+        area_km2 = as.numeric(area)/1e6,
+        calculation_status = ifelse(is.na(area), "area_failed", "success")
+      )
+    })
+  }, error = function(e) {
+    message("Error processing layer ", layer_name, ": ", e$message)
+    return(NULL)
+  })
+}
+
+# Process all layers
+results <- map_dfr(layers, process_layer, .id = "layer_id")
+
+# View problematic cases
+problems <- results %>% filter(calculation_status != "success")
+if (nrow(problems) > 0) {
+  message("\nFound ", nrow(problems), " features with calculation issues:")
+  print(problems)
+}
+
+# Save final results
+write.csv(results, "polygon_centroids_areas_robust.csv", row.names = FALSE)
+```

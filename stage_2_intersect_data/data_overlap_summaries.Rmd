@@ -57,9 +57,9 @@ bioshifts_harmo_intersect=bioshifts_harmo %>%
 #Read new data and summaries
 ##Bioshift
 ```{r}
-bioshifts_harmo_intersect=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_2_merge_data/bioshifts_harmo_intersect.rds")
+bioshifts_harmo_intersect=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_2_intersect_data/bioshifts_harmo_intersect.rds")
 
-biotime_harmo_intersect=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_2_merge_data/biotime_harmo_intersect.rds") %>% #create unique pop and keep esential columns
+biotime_harmo_intersect=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_2_intersect_data/biotime_harmo_intersect.rds") %>% #create unique pop and keep esential columns
   mutate(unique_id=paste(species_harmonized,STUDY_ID,PLOT)) %>% 
   select(unique_id,
          species_harmonized,
@@ -101,6 +101,14 @@ after reducing large latitudinal ranges
 #filter again for bioshifts
 bioshifts_harmo_intersect_spat_cont=bioshifts_harmo_intersect %>% 
   filter(species_harmonized%in%biotime_harmo_intersect_spat_cont$species_harmonized)
+```
+
+Write outputs
+```{r}
+#Biotime_filter
+write_rds(biotime_harmo_intersect_spat_cont,"biotime_harmo_intersect_spat_cont.rds")
+#Bioshift_filter
+write_rds(bioshifts_harmo_intersect_spat_cont,"bioshifts_harmo_intersect_spat_cont.rds")
 ```
 
 How many fishes?
