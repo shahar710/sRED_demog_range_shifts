@@ -11,15 +11,20 @@ library(dplyr)
 library(purrr)
 ```
 
+Fix split into multiple sub features
 ```{r}
+library(sf)
+library(dplyr)
+library(purrr)
+
 # Set path to your GDB
 gdb_path <- "C:/Users/User/Desktop/research/data/Bioshifts/Study_Areas.gdb"
 
 # List all layers
 layers <- st_layers(gdb_path)$name
 
-# Enhanced processing function with full error handling
-process_layer <- function(layer_name) {
+# Function to get bounding box coordinates for a layer
+get_layer_extent <- function(layer_name) {
   tryCatch({
     # Read layer with validation
     sf_obj <- st_read(gdb_path, layer = layer_name, quiet = TRUE) %>%
@@ -30,55 +35,52 @@ process_layer <- function(layer_name) {
       return(NULL)
     }
     
-    # Process features one by one with error handling
-    map_dfr(1:nrow(sf_obj), function(i) {
-      feature <- sf_obj[i, ]
-      
-      # Skip if geometry is empty
-      if (st_is_empty(feature)) return(NULL)
-      
-      # Make valid and try calculations
-      feature <- st_make_valid(feature)
-      
-      # Calculate area (with fallback)
-      area <- tryCatch(
-        st_area(feature),
-        error = function(e) NA_real_
-      )
-      
-      # Calculate centroid (with fallback to point on surface)
-      centroid <- tryCatch(
-        st_centroid(feature),
-        error = function(e) st_point_on_surface(feature)
-      )
-      
-      # Return results
-      tibble(
-        layer = layer_name,
-        feature_id = i,
-        bioshift_long_cent = st_coordinates(centroid)[1],
-        bioshift_lat_cent = st_coordinates(centroid)[2],
-        area_m2 = as.numeric(area),
-        area_km2 = as.numeric(area)/1e6,
-        calculation_status = ifelse(is.na(area), "area_failed", "success")
-      )
-    })
+    # Get bounding box for the entire layer
+    bbox <- st_bbox(sf_obj)
+    
+    # Return results
+    tibble(
+      layer = layer_name,
+      min_long = bbox["xmin"],
+      min_lat = bbox["ymin"],
+      max_long = bbox["xmax"],
+      max_lat = bbox["ymax"],
+      n_features = nrow(sf_obj),
+      status = "success"
+    )
   }, error = function(e) {
     message("Error processing layer ", layer_name, ": ", e$message)
-    return(NULL)
+    tibble(
+      layer = layer_name,
+      min_long = NA_real_,
+      min_lat = NA_real_,
+      max_long = NA_real_,
+      max_lat = NA_real_,
+      n_features = NA_integer_,
+      status = paste0("error: ", e$message)
+    )
   })
 }
 
-# Process all layers
-results <- map_dfr(layers, process_layer, .id = "layer_id")
+# Process all layers to get their extents
+layer_extents <- map_dfr(layers, get_layer_extent)
 
-# View problematic cases
-problems <- results %>% filter(calculation_status != "success")
+# View problematic layers
+problems <- layer_extents %>% filter(status != "success")
 if (nrow(problems) > 0) {
-  message("\nFound ", nrow(problems), " features with calculation issues:")
+  message("\nFound ", nrow(problems), " layers with processing issues:")
   print(problems)
+} else {
+  message("\nAll layers processed successfully!")
 }
 
+layer_extents_cent=layer_extents %>% 
+  group_by(layer) %>% 
+  mutate(cent_lat=mean(c(min_lat,max_lat)),
+         cent_long=mean(c(min_long,max_long))) %>% 
+  rename(Source=layer)
+
 # Save final results
-write.csv(results, "polygon_centroids_areas_robust.csv", row.names = FALSE)
+write.csv(layer_extents_cent, "layer_extents.csv", row.names = FALSE)
 ```
+
