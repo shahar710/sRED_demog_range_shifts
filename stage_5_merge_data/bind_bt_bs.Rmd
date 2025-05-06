@@ -1,0 +1,39 @@
+---
+title: "bind_bt_bs"
+author: "Shahar Chaikin"
+date: "2025-05-06"
+output: html_document
+---
+
+library
+```{r}
+library(tidyverse)
+```
+
+Load previos data and coords
+```{r}
+biotime_harmo_intersect_spat_cont=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_2_intersect_data\\biotime_harmo_intersect_spat_cont.rds")
+
+bioshifts_harmo_intersect_spat_cont=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_2_intersect_data/bioshifts_harmo_intersect_spat_cont.rds")
+
+bioshift_coords=read.csv("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_3_extract_bioshift_coords/layer_extents.csv")
+```
+
+add coords to bioshifts
+```{r}
+bioshifts_harmo_intersect_spat_cont=bioshifts_harmo_intersect_spat_cont %>% 
+  left_join(bioshift_coords %>% 
+              select(Source,cent_lat,cent_long),
+            by="Source") %>% 
+  select(-c(Genus,Species)) %>% 
+  relocate(species_harmonized,.before = Hemisphere)
+```
+
+Join
+```{r}
+biotime_bioshift_merged=biotime_harmo_intersect_spat_cont %>% 
+  left_join(bioshifts_harmo_intersect_spat_cont,
+            by="species_harmonized")
+```
+
+

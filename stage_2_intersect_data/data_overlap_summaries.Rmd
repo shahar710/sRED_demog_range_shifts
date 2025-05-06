@@ -93,7 +93,20 @@ biotime_harmo_intersect=read_rds("C:\\Users\\User\\Desktop\\research\\working gr
   filter(sum(abundance)>=1,
          n_distinct(year) >=3) %>% #At least three unique sampled years
   ungroup()
+
+#Mean coords per pop
+biotime_mean_lat_long=biotime_harmo_intersect_spat_cont %>% 
+  group_by(unique_id) %>% 
+  summarise(mean_lat=mean(lat),
+            mean_long=mean(long))
+
+#Estiamte mean annual abundance
+biotime_mean_an_abundance=biotime_harmo_intersect_spat_cont %>% 
+  group_by(unique_id,species_harmonized,study_id,year) %>% 
+  summarise(mean_abund=mean(abundance)) %>% 
+  left_join(biotime_mean_lat_long,by="unique_id")
 ```
+
 
 #Final intersection with bioshifts
 after reducing large latitudinal ranges
@@ -106,7 +119,7 @@ bioshifts_harmo_intersect_spat_cont=bioshifts_harmo_intersect %>%
 Write outputs
 ```{r}
 #Biotime_filter
-write_rds(biotime_harmo_intersect_spat_cont,"biotime_harmo_intersect_spat_cont.rds")
+write_rds(biotime_mean_an_abundance,"biotime_mean_an_abundance.rds")
 #Bioshift_filter
 write_rds(bioshifts_harmo_intersect_spat_cont,"bioshifts_harmo_intersect_spat_cont.rds")
 ```
