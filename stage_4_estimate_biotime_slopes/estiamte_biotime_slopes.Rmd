@@ -1,0 +1,135 @@
+---
+title: "estiamte_biotime_slopes"
+author: "Shahar Chaikin"
+date: "2025-05-06"
+output: html_document
+---
+
+library
+```{r}
+library(tidyverse)
+```
+
+Read annuabl biotime abundance
+```{r}
+mean_biotime_abundance=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_2_intersect_data\\biotime_mean_an_abundance.rds")
+```
+
+Slopes
+```{r}
+effect_size_raw = mean_biotime_abundance %>%  # Start with the mean_biotime_abundance dataframe
+  group_by(unique_id, species_harmonized, mean_lat, mean_long) %>%  # Group by these identifiers
+  summarise(
+    # Extract intercept from Poisson GLM of abundance vs year (rounded to 4 decimals)
+    intercept = (glm(mean_abund ~ year, family = poisson)$coefficients[1]) %>% 
+      round(digits = 4),
+    
+    # Extract slope coefficient from same model (rounded to 4 decimals)
+    slope = (glm(mean_abund ~ year, family = poisson)$coefficients[2]) %>% 
+      round(digits = 4),
+    
+    # Extract standard error of the slope (rounded to 6 decimals)
+    se_slope = (summary(glm(mean_abund ~ year, family = poisson))$coefficients[4]) %>% 
+      round(digits = 6),
+    
+    # Calculate coefficient of variation (CV) for population as percentage
+    cv_pop = ((sd(mean_abund)/mean(mean_abund))) * 100,
+    
+    # Calculate McFadden's pseudo-R² for model fit (rounded to 3 decimals)
+    McFadden_R2 = (pscl::pR2(glm(mean_abund ~ year, family = poisson))[[4]]) %>% 
+      round(digits = 3),
+    
+    # Record the first (minimum) year in the time series
+    year_s = min(year),
+    
+    # Calculate year 10 years after the start year
+    year_10 = year_s + 10,
+    
+    # Record the last (maximum) year in the time series
+    year_e = max(year),
+    
+    # Calculate the total timespan in years (+1 to include both endpoints)
+    year_range = (year_e - year_s) + 1,
+    
+    # Count number of observations (years) for this group
+    n = n(),
+    
+    # Calculate relative sampling frequency (obs per year)
+    rel_sample_per_year = n/year_range,
+    
+    # Get fitted value for first year (exponentiated from log scale)
+    fitted_first = exp(head(predict(glm(mean_abund ~ year,
+                                      family = poisson)),
+                         n = 1)),
+    
+    # Get predicted value for year_10 (exponentiated from log scale)
+    fitted_10 = exp(predict(glm(mean_abund ~ year,
+                             family = poisson),
+                   newdata = data.frame(year = c(year_10)))),
+    
+    # Get fitted value for last year (on response scale)
+    fitted_last = (tail(fitted(glm(mean_abund ~ year,
+                                 family = poisson)),
+                      n = 1)),
+    
+    # Calculate ratio of 10-year prediction to first year
+    ratio_fitted = (fitted_10/fitted_first),
+    
+    # Calculate natural log of the ratio
+    ln_ratio_fitted = log(ratio_fitted)
+  )
+
+#Save
+write_rds(effect_size_raw,"biotime_slopes.rds")
+```
+
+Paste to stage_5
+```{r}
+library(tidyverse)
+library(sf)
+library(nngeo)
+
+# Assume df1 and df2 are your dataframes with columns:
+# df1: species, latitude, longitude, ... (other columns)
+# df2: species, latitude, longitude, ... (other columns)
+
+# Convert both dataframes to sf objects (spatial dataframes)
+df1_sf <- df1 %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326)  # WGS84 coordinate system
+
+df2_sf <- df2 %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
+
+# For each row in df1, find the nearest matching species in df2
+joined_data <- df1_sf %>%
+  # Join by species name first
+  inner_join(df2_sf %>% st_drop_geometry(), by = "species") %>%
+  # Now find the nearest point for each species match
+  group_by(species, row_number()) %>%  # row_number() ensures we treat each df1 row separately
+  mutate(
+    nearest_index = st_nn(
+      geometry,
+      df2_sf %>% filter(species == cur_data()$species[1]),
+      k = 1,
+      progress = FALSE
+    )[[1]]
+  ) %>%
+  # Get the data from the nearest point in df2
+  mutate(
+    nearest_data = map(nearest_index, ~df2_sf[.x, ] %>% st_drop_geometry())
+  ) %>%
+  unnest(nearest_data) %>%
+  # Calculate the distance between the points
+  mutate(
+    distance_m = st_distance(geometry, st_as_sf(nearest_data, coords = c("longitude", "latitude"), crs = 4326), by_element = TRUE)
+  ) %>%
+  # Select and rename columns as needed
+  select(-nearest_index, -geometry) %>%
+  rename(
+    df1_lat = latitude.x,
+    df1_long = longitude.x,
+    df2_lat = latitude.y,
+    df2_long = longitude.y
+  )
+```
+

@@ -12,7 +12,7 @@ library(tidyverse)
 
 Load previos data and coords
 ```{r}
-biotime_harmo_intersect_spat_cont=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_2_intersect_data\\biotime_harmo_intersect_spat_cont.rds")
+biotime_abund_slopes=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_4_estimate_biotime_slopes/biotime_slopes.rds")
 
 bioshifts_harmo_intersect_spat_cont=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_2_intersect_data/bioshifts_harmo_intersect_spat_cont.rds")
 
@@ -31,9 +31,21 @@ bioshifts_harmo_intersect_spat_cont=bioshifts_harmo_intersect_spat_cont %>%
 
 Join
 ```{r}
-biotime_bioshift_merged=biotime_harmo_intersect_spat_cont %>% 
+biotime_bioshift_merged_centroids=biotime_abund_slopes %>% 
+  ungroup() %>% 
+  rowwise() %>% 
   left_join(bioshifts_harmo_intersect_spat_cont,
-            by="species_harmonized")
+            by="species_harmonized") %>% 
+  filter(Position%in%"Centroid") %>% #Focus on centroid range shift velocities
+  mutate(dist_BioTime_BioShift=(geosphere::distHaversine( #estimate distances in km
+    p1=c(mean_long,mean_lat),
+    p2=c(cent_long,cent_lat))/1000)) %>% 
+  # For each BioTime population, keep only the closest BioShift record
+  group_by(unique_id) %>% 
+  filter(dist_BioTime_BioShift == min(dist_BioTime_BioShift)) %>% 
+  # If multiple BioShift records have exactly the same minimum distance, keep just one
+  slice(1) %>% 
+  ungroup()
 ```
 
 
