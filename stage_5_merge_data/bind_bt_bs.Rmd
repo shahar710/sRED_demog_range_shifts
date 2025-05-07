@@ -53,7 +53,7 @@ biotime_bioshift_merged_centroids %>%
   summarise(n=n())
 
 #Write
-write.csv(biotime_bioshift_merged_centroids,"biotime_bioshift_merged_centroids.csv",row.names = F)
+#write.csv(biotime_bioshift_merged_centroids,"biotime_bioshift_merged_centroids.csv",row.names = F)
 ```
 
 #Summarise the data
