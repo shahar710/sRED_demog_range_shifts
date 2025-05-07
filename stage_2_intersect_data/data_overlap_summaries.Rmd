@@ -116,8 +116,15 @@ bioshifts_harmo_intersect_spat_cont=bioshifts_harmo_intersect %>%
   filter(species_harmonized%in%biotime_harmo_intersect_spat_cont$species_harmonized)
 ```
 
-Write outputs
+Species for icc_download
 ```{r}
+sp_list=bioshifts_harmo_intersect_spat_cont %>% 
+  distinct(species_harmonized,usageKey) %>% write.csv("sp_list.csv",row.names = F)
+```
+
+
+Write outputs
+```{r eval=FALSE, include=FALSE}
 #Biotime_filter
 write_rds(biotime_mean_an_abundance,"biotime_mean_an_abundance.rds")
 #Bioshift_filter

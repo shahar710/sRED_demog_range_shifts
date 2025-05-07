@@ -25,7 +25,7 @@ bioshifts_harmo_intersect_spat_cont=bioshifts_harmo_intersect_spat_cont %>%
   left_join(bioshift_coords %>% 
               select(Source,cent_lat,cent_long),
             by="Source") %>% 
-  select(-c(Genus,Species)) %>% 
+  #select(-c(Genus,Species)) %>% 
   relocate(species_harmonized,.before = Hemisphere)
 ```
 
@@ -111,7 +111,18 @@ mean_slope_Order=biotime_bioshift_merged_centroids %>%
 
 #Plots
 ```{r}
-ggplot(biotime_bioshift_merged_centroids)+
-  geom_histogram(aes(x=slope,fill=Ecosystem))
+hist_plots=ggplot(biotime_bioshift_merged_centroids)+
+  geom_vline(xintercept = 0,linetype="dashed")+
+  geom_histogram(aes(x=slope,fill=Ecosystem),bins = 300,alpha=.8)+
+  scale_fill_manual(values = c("Terrestrial" = "#6FB74E", "Marine" = "skyblue"))+
+  coord_cartesian(xlim=c(-1,1))+
+  theme_classic()
+hist_plots
+
+biotime_bioshift_merged_centroids %>% 
+  group_by(Ecosystem) %>% 
+  summarise(n=n_distinct(unique_id))
+
+ggsave(plot = hist_plots, filename = "hist_plots.png",device ="png",height = 10,width = 16, units = "cm",dpi = 800,path = "C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_5_merge_data//")
 ```
 

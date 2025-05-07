@@ -1,0 +1,112 @@
+---
+title: "download_occ_simple"
+author: "Shahar Chaikin"
+date: "2024-12-17"
+output: html_document
+---
+As I already downloaded occurrences using the abundance dataset, here I will only focus on species that are unique to the biomass dataset.
+
+Libraries
+```{r}
+library(tidyverse)
+library(rgbif)
+library(CoordinateCleaner)
+```
+
+What is the biomass species list?
+```{r}
+sp_list = read.csv("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_7_occ_extraction\\sp_list.csv") %>%
+  mutate(usageKey = as.numeric(str_extract(usageKey, "\\d+"))) %>%
+  distinct(usageKey,species_harmonized)
+```
+
+GBIF credentials
+```{r}
+user="shahar_chaikin"
+pwd="o08*ZE!7m1Cp"
+email="shahar710@gmail.com"
+```
+
+Occurrence extraction function
+```{r}
+# Function to download GBIF data for a vector of usageKeys and return a combined dataframe
+download_gbif_data <- function(usageKeys, user, pwd, email, format = "SIMPLE_CSV") {
+  
+  # Create an empty data frame to store results
+  combined_data <- data.frame()
+  
+  for (i in 1:length(usageKeys)) {
+    
+    # Build the query with the current usageKey
+    pred_taxon <- pred("taxonKey", usageKeys[i])
+    
+    # Download data with wait and error handling
+    download <- tryCatch({
+      occ_download(pred_taxon,
+                  pred("hasGeospatialIssue", FALSE),
+                  pred("hasCoordinate", TRUE),
+                  pred("occurrenceStatus", "PRESENT"),
+                  pred_gte("year", 1900),
+                  #pred_lte("coordinateUncertaintyInMeters", 10000),
+                  user = user,
+                  pwd = pwd,
+                  email = email,
+                  format = format)
+    }, error = function(e) {
+      warning(paste("Error downloading data for usageKey:", usageKeys[i]))
+      return(NULL)
+    })
+    
+    # Check if download was successful
+    if (!is.null(download)) {
+      # Wait for download to finish
+      occ_download_wait(download)
+      # Get and import data
+      current_data <- occ_download_get(download) |> occ_download_import()
+      # Bind the current data to the combined data frame
+      combined_data <- rbind(combined_data, current_data) 
+    }
+  }
+  
+  return(combined_data)
+}
+```
+
+
+#1) Download
+Download all occ in the wanted destination
+```{r}
+setwd("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_7_occ_extraction\\occ_raw/")
+```
+
+##1.1) a bulk
+Done
+```{r}
+a_bulk=download_gbif_data(usageKeys =as.character(sp_list$usageKey[1:100]),
+                   user = user,
+                   pwd = pwd,
+                   email = email)
+write_rds(a_bulk,"a_bulk_juan.rds")
+```
+
+##1.1) b bulk
+Done
+```{r}
+b_bulk=download_gbif_data(usageKeys =as.character(sp_list$usageKey[101:200]),
+                   user = user,
+                   pwd = pwd,
+                   email = email)
+write_rds(b_bulk,"b_bulk_juan.rds")
+```
+
+##1.1) b bulk
+Done
+```{r}
+c_bulk=download_gbif_data(usageKeys =as.character(sp_list$usageKey[201:300]),
+                   user = user,
+                   pwd = pwd,
+                   email = email)
+write_rds(c_bulk,"c_bulk_juan.rds")
+```
+
+Create more bulks as needed..

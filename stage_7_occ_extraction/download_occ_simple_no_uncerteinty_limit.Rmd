@@ -1,0 +1,323 @@
+---
+title: "download_occ_simple"
+author: "Shahar Chaikin"
+date: "2024-12-17"
+output: html_document
+---
+As I already downloaded occurrences using the abundance dataset, here I will only focus on species that are unique to the biomass dataset.
+
+Libraries
+```{r}
+library(tidyverse)
+library(rgbif)
+library(CoordinateCleaner)
+```
+
+What is the biomass species list?
+```{r}
+sp_list = read.csv("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_7_occ_extraction\\sp_list.csv") %>%
+  mutate(usageKey = as.numeric(str_extract(usageKey, "\\d+"))) %>%
+  distinct(usageKey,species_harmonized)
+```
+
+GBIF credentials
+```{r}
+user="shahar_chaikin"
+pwd="o08*ZE!7m1Cp"
+email="shahar710@gmail.com"
+```
+
+Occurrence extraction function
+```{r}
+# Function to download GBIF data for a vector of usageKeys and return a combined dataframe
+download_gbif_data <- function(usageKeys, user, pwd, email, format = "SIMPLE_CSV") {
+  
+  # Create an empty data frame to store results
+  combined_data <- data.frame()
+  
+  for (i in 1:length(usageKeys)) {
+    
+    # Build the query with the current usageKey
+    pred_taxon <- pred("taxonKey", usageKeys[i])
+    
+    # Download data with wait and error handling
+    download <- tryCatch({
+      occ_download(pred_taxon,
+                  pred("hasGeospatialIssue", FALSE),
+                  pred("hasCoordinate", TRUE),
+                  pred("occurrenceStatus", "PRESENT"),
+                  pred_gte("year", 1900),
+                  #pred_lte("coordinateUncertaintyInMeters", 10000),
+                  user = user,
+                  pwd = pwd,
+                  email = email,
+                  format = format)
+    }, error = function(e) {
+      warning(paste("Error downloading data for usageKey:", usageKeys[i]))
+      return(NULL)
+    })
+    
+    # Check if download was successful
+    if (!is.null(download)) {
+      # Wait for download to finish
+      occ_download_wait(download)
+      # Get and import data
+      current_data <- occ_download_get(download) |> occ_download_import()
+      # Bind the current data to the combined data frame
+      combined_data <- rbind(combined_data, current_data) 
+    }
+  }
+  
+  return(combined_data)
+}
+```
+
+
+#1) Download
+Download all occ in the wanted destination
+```{r}
+setwd("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\stage_7_occ_extraction\\occ_raw/")
+```
+
+##1.1) a bulk
+Done
+```{r}
+a_bulk=download_gbif_data(usageKeys =as.character(sp_list$usageKey[1:2]),
+                   user = user,
+                   pwd = pwd,
+                   email = email)
+write_rds(a_bulk,"a_bulk_shahar.rds")
+```
+
+Read file
+```{r}
+raw_occ_no_unc_limit=read_rds("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\")
+```
+
+#2) Remove occ. on land
+```{r}
+library(sf)
+
+# Load your data
+data <- raw_occ_no_unc_limit 
+
+# Create an sf object from your data
+occurrences_sf <- sf::st_as_sf(data, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326) 
+
+# Load the land shapefile
+land_sf <- sf::st_read("C:\\Users\\User\\Desktop\\research\\postdoc\\Araujo\\MHWs_project\\R\\MHW_postdoc_project\\stage_2_spat_therm_position\\ne_10m_land\\ne_10m_land.shp") 
+
+# Check for occurrences on land
+occurrences_on_land <- lengths(sf::st_intersects(occurrences_sf, land_sf)) > 0 
+
+# Flag occurrences on land
+data$on_land <- occurrences_on_land
+
+# Remove occurrences on land
+data_filtered <- data %>% 
+  filter(!on_land)
+
+#How many were removed?
+length(data$on_land)-length(data_filtered$on_land)
+
+# Output the filtered data
+#write_rds(data_filtered, "occ_filtered_sea_no_unc_limit_biomass_public_MEDITS_add.rds") 
+occ_filtered_sea_no_unc_limit=data_filtered
+rm(data_filtered)
+rm(data)
+rm(raw_occ_no_unc_limit)
+rm(occurrences_sf)
+```
+
+Read up till here
+```{r}
+occ_filtered_sea_no_unc_limit=read_rds("C:\\Users\\User\\Desktop\\research\\postdoc\\Araujo\\MHWs_project\\R\\MHW_postdoc_project\\stage_2_spat_therm_position\\gbif_bulks_no_uncerteinty_limit_biomass/occ_filtered_sea_no_unc_limit_biomass.rds")
+
+#Explore the 'coordinateUncertaintyInMeters' variable
+options(scipen = 999)
+DataExplorer::plot_missing(occ_filtered_sea_no_unc_limit)
+
+discard(occ_filtered_sea_no_unc_limit$coordinateUncertaintyInMeters,is.na) %>% 
+  range
+```
+#3) additional filters
+```{r}
+occ_filtered_fine_no_unc_limit=occ_filtered_sea_no_unc_limit %>% 
+  filter(
+    #remove fossils and living specimens from zoos
+    !basisOfRecord %in% c("FOSSIL_SPECIMEN", "LIVING_SPECIMEN"),
+    #GeoLocate centroids or other default. remove them because usually the            uncertainty is larger than stated
+    !coordinateUncertaintyInMeters %in% c(301, 3036, 999, 9999),
+    #When uncertainty in known remove occurrences with accuracy bigger then 50 km
+    #A balance between quality and quantity when possible
+    is.na(coordinateUncertaintyInMeters) | 
+           coordinateUncertaintyInMeters <= 50000,
+    !decimalLatitude == 0 | !decimalLongitude == 0) %>%
+    #drop_na(coordinateUncertaintyInMeters) %>% 
+   #Remove coords in the center of countries
+   #Remove coords in capitals
+   #Remove coords near GBIF HQ
+   #Remove coords near zoological institutions
+    cc_cen(buffer = 2000, lon = "decimalLongitude", lat = "decimalLatitude") %>%
+    cc_cap(buffer = 2000, lon = "decimalLongitude", lat = "decimalLatitude") %>%
+    cc_inst(buffer = 2000, lon = "decimalLongitude", lat = "decimalLatitude") %>%
+    cc_gbif(buffer = 2000, lon = "decimalLongitude", lat = "decimalLatitude") %>%
+    #Remove duplicates
+    distinct(decimalLongitude,
+             decimalLatitude,
+             speciesKey,
+             datasetKey,
+             #Keep all other columns
+             .keep_all = TRUE)
+
+write_rds(occ_filtered_fine_no_unc_limit,"occ_filtered_fine_no_unc_limit.rds")
+```
+
+Read up till here if needed
+```{r eval=FALSE, include=FALSE}
+occ_filtered_fine_no_unc_limit=read_rds("C:\\Users\\User\\Desktop\\research\\postdoc\\Araujo\\MHWs_project\\R\\MHW_postdoc_project\\stage_2_spat_therm_position\\gbif_bulks_no_uncerteinty_limit_biomass/occ_filtered_sea_no_unc_limit_biomass_public_MEDITS_add.rds")
+```
+
+Return species names according to the harmonization file and the usageKey
+```{r}
+#How many distinct species in the filtered data?
+occ_filtered_fine_no_unc_limit$speciesKey %>% n_distinct()
+
+#Which species are in the harmonized file but not in the occ file?
+setdiff(unique(sp_list$usageKey),unique(occ_filtered_fine_no_unc_limit$speciesKey))
+#Almost half of the species downloaded now don't have a uasagekey that matches the list provided.
+
+#Return the harmonized species names according to the useageKey
+sp_list_cleaned_occ = occ_filtered_fine_no_unc_limit %>%
+  select(usageKey = speciesKey,
+         decimalLatitude,
+         decimalLongitude) %>%
+  left_join(sp_list %>% 
+              select(usageKey,
+                     species = scientificName) %>% 
+              #Handle duplicate rows such as in Aetomylaeus bovinus
+              distinct(usageKey,species),
+            by = "usageKey")
+#write_rds(sp_list_cleaned_occ,"sp_occ_lite_no_uncertainty_limits_biomass_addition_public_MEDITS_add.rds")
+
+#How many species have occurrences?
+sp_list$scientificName %>% n_distinct()
+sp_list_cleaned_occ$usageKey %>% n_distinct()
+# Is theremore than one usageKey for some species
+sp_list_cleaned_occ %>% 
+  group_by(species) %>% 
+  summarise(n_usageKey=n_distinct(usageKey)) %>% 
+  filter(n_usageKey>1)
+#no
+
+#How many occurrences per species?
+occ_per_sp_before_spthin=sp_list_cleaned_occ %>% 
+  group_by(species) %>% 
+  summarise(n_occ=n_distinct(decimalLatitude,
+                             decimalLongitude))
+#summary sts.
+#Plot
+occ_per_sp_before_spthin$n_occ %>% quantile() 
+ggplot(occ_per_sp_before_spthin)+
+  geom_violin(aes(y=n_occ,x=""),
+              fill="grey")+
+  geom_jitter(aes(y=n_occ,x=""),
+              width=0.1,
+              alpha=0.3)+
+  geom_boxplot(aes(y=n_occ,x=""),
+               width=0.4,
+               size=1,
+               fill="green",
+               alpha=0.7)+
+  scale_y_log10()+
+  labs(y="Occurrences",x="")+
+  theme_bw()
+```
+
+#4) Spatial thinning
+To be looped at the species level
+```{r eval=FALSE, include=FALSE}
+library(spThin)
+rm(occ_filtered_fine_no_unc_limit)
+for (i in occ_per_sp_before_spthin %>% 
+     drop_na(species) %>% 
+     select(species) %>% 
+     pull() %>% 
+     unique()){
+ spThin::thin(
+  loc.data = sp_list_cleaned_occ %>% 
+    filter(species%in%i),
+  lat.col = "decimalLatitude",
+  long.col = "decimalLongitude",
+  spec.col = "species",
+  #min NND of 10km (try something else to see if it runs )
+  thin.par = 10,
+  #One repetition per species
+  reps = 1,
+  #One dataset per species is enough - the df with most occ. is written
+  max.files = 1,
+  out.dir = "C:\\Users\\User\\Desktop\\research\\postdoc\\Araujo\\MHWs_project\\R\\MHW_postdoc_project\\stage_2_spat_therm_position\\spthin/public_MEDITS_addition/",
+  out.base = paste(i))
+}
+```
+
+Load all thin spp. files
+```{r}
+# Get a list of all .rds files in the folder
+thin_file_paths <- list.files(path = "C:\\Users\\User\\Desktop\\research\\postdoc\\Araujo\\MHWs_project\\R\\MHW_postdoc_project\\stage_2_spat_therm_position\\spthin\\public_MEDITS_addition/", pattern = "*.csv", full.names = TRUE)
+
+# Read all .rds files into a list of data frames
+thin_data_list <- map(thin_file_paths, read.csv)
+
+# Bind all rows of the data frames in the list
+thin_sp_occ <- bind_rows(thin_data_list)
+#write_rds(thin_sp_occ,"thin_sp_occ_no_uncertainty_limits_biomass_addition_public_MEDITS_add.rds")
+```
+
+Read result if needed
+```{r}
+thin_sp_occ=read_rds("C:\\Users\\User\\Desktop\\research\\postdoc\\Araujo\\MHWs_project\\R\\MHW_postdoc_project\\stage_2_spat_therm_position\\spthin\\with_no_uncerteinty_limit_biomass\\thin_sp_occ_no_uncertainty_limits_biomass_addition.rds")
+#How many species?
+thin_sp_occ$species %>% n_distinct()
+```
+
+Investigate the final occurrence dataset
+```{r}
+#How many species?
+thin_sp_all_sp$species %>% n_distinct()
+#Occurrences per species
+thin_sp_occ_summary=thin_sp_all_sp %>% 
+  group_by(species) %>% 
+  summarise(n_occ=n_distinct(decimalLongitude,
+                            decimalLatitude))
+
+#Percentiles of occurrences
+thin_sp_occ_summary$n_occ %>% quantile()
+#Plot: Occurrences per species
+ggplot(thin_sp_all_sp%>% 
+  group_by(species) %>% 
+  summarise(n_occ=n_distinct(decimalLatitude,
+                             decimalLongitude)))+
+  geom_violin(aes(x=n_occ,y=""),
+              fill="grey",
+              alpha=0.8,
+              size=NA)+
+  geom_jitter(aes(x=n_occ,y=""),
+              width=0.1,
+              alpha=0.5,
+              color="grey")+
+  geom_boxplot(aes(x=n_occ,y=""),
+               width=0.4,
+               size=0.8,
+               fill="green",
+               alpha=0.4,
+               notch=T,
+               outliers = F)+
+  scale_x_log10()+
+  labs(x="Occurrences",y="Species",title = paste("Occurrence per species (Spp. = ",
+                                                 thin_sp_all_sp$species %>% 
+                                                   n_distinct(),
+                                                 ")"))+
+  theme_bw()
+```
+
