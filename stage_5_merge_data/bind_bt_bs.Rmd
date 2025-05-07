@@ -46,6 +46,72 @@ biotime_bioshift_merged_centroids=biotime_abund_slopes %>%
   # If multiple BioShift records have exactly the same minimum distance, keep just one
   slice(1) %>% 
   ungroup()
+
+#How many shift estiamtes of the centoids per population?
+biotime_bioshift_merged_centroids %>% 
+  group_by(unique_id) %>% 
+  summarise(n=n())
+
+#Write
+write.csv(biotime_bioshift_merged_centroids,"biotime_bioshift_merged_centroids.csv",row.names = F)
 ```
 
+#Summarise the data
+Estimate slopes
+```{r}
+#Mean slope 
+mean_slope=biotime_bioshift_merged_centroids %>% 
+  ungroup() %>% 
+  summarise(mean_slope=mean(slope),
+            n=n(),
+            ci_low=confint(data=biotime_bioshift_merged_centroids,
+                           lm(slope~1))[,1],
+            ci_high=confint(data=biotime_bioshift_merged_centroids,
+                           lm(slope~1))[,2])
+#Mean slope across realms
+mean_slope_ecosystem=biotime_bioshift_merged_centroids %>% 
+  group_by(Ecosystem) %>% 
+  summarise(mean_slope=mean(slope),
+            n=n(),
+            ci_low=confint(data=biotime_bioshift_merged_centroids,
+                           lm(slope~1))[,1],
+            ci_high=confint(data=biotime_bioshift_merged_centroids,
+                           lm(slope~1))[,2])
+
+#Mean slope across phylum
+mean_slope_Phylum=biotime_bioshift_merged_centroids %>% 
+  group_by(Phylum) %>% 
+  summarise(mean_slope=mean(slope),
+            n=n(),
+            ci_low=confint(data=biotime_bioshift_merged_centroids,
+                           lm(slope~1))[,1],
+            ci_high=confint(data=biotime_bioshift_merged_centroids,
+                           lm(slope~1))[,2])
+
+#Mean slope across class
+mean_slope_Class=biotime_bioshift_merged_centroids %>% 
+  group_by(Class) %>% 
+  summarise(mean_slope=mean(slope),
+            n=n(),
+            ci_low=confint(data=biotime_bioshift_merged_centroids,
+                           lm(slope~1))[,1],
+            ci_high=confint(data=biotime_bioshift_merged_centroids,
+                           lm(slope~1))[,2])
+
+#Mean slope across Order
+mean_slope_Order=biotime_bioshift_merged_centroids %>% 
+  group_by(Order) %>% 
+  summarise(mean_slope=mean(slope),
+            n=n(),
+            ci_low=confint(data=biotime_bioshift_merged_centroids,
+                           lm(slope~1))[,1],
+            ci_high=confint(data=biotime_bioshift_merged_centroids,
+                           lm(slope~1))[,2])
+```
+
+#Plots
+```{r}
+ggplot(biotime_bioshift_merged_centroids)+
+  geom_histogram(aes(x=slope,fill=Ecosystem))
+```
 
