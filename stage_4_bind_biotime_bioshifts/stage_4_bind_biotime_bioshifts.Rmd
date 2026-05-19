@@ -297,19 +297,27 @@ plot_map_americas <- ggplot() +
           alpha = 0.8, linewidth = 0.1) +
   coord_sf(crs = "+proj=robin", 
            xlim = c(-14500000, -4500000), ylim = c(1000000, 7000000)) +
-  scale_fill_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f", "Fre" = "#e9c46a")) +
   theme_minimal() +
+  scale_fill_manual(
+    values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f", "Fre" = "#e9c46a"),
+    labels = c("Mar" = "Marine", "Ter" = "Terrestrial", "Fre" = "Freshwater")
+  ) +
   labs(title = "A) Americas & Pacific", x = NULL, y = NULL) +
   theme(
     panel.background = element_rect(fill = "#e4f1f5", color = NA),
     panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5), 
     panel.grid.major = element_line(color = "grey80", linetype = "dashed", linewidth = 0.3),
-    # THE FIX: Negative bottom margin (-20) pulls the title down to the map border
     plot.title = element_text(hjust = 0.5, face = "bold", size = 14, margin = margin(t = 10, b = -20)),
     axis.text = element_text(size = 8, color = "grey30"),
-    legend.position = c(0.15, 0.2), 
+    
+    # THE FIX 2: Enlarge the legend elements
+    legend.position = c(0.18, 0.22), # Shifted slightly up/right to accommodate larger size
     legend.background = element_rect(fill = "white", color = "black", linewidth = 0.3),
     legend.title = element_blank(),
+    legend.text = element_text(size = 11),           # Larger text font
+    legend.key.size = unit(1.5, "lines"),            # Larger color boxes
+    legend.margin = margin(t = 6, r = 8, b = 6, l = 8), # Padding inside the white box
+    
     plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
   )
 
@@ -370,101 +378,127 @@ ggsave("./stage_4_bind_biotime_bioshifts/maps.png",
        width = 14, height = 10, dpi = 300, bg = "white")
 ```
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 ```{r}
+library(gridExtra)
+library(grid)
 
-# 1. Americas Map (Legend inside)
+## Maps
+# 1. Calculate unique species per H3 hexagon
+h3_hexagons <- final_dataset_lite %>%
+  group_by(h3_id) %>%
+  summarise(n_species = n_distinct(species_harmonized), .groups = "drop")
+
+# Extract raw polygons and convert to sf
+h3_hexagons$geometry <- cell_to_polygon(h3_hexagons$h3_id, simple = TRUE)
+h3_hexagons <- st_as_sf(h3_hexagons, crs = 4326)
+
+# Split polygons that cross the International Date Line
+h3_hexagons <- st_wrap_dateline(h3_hexagons)
+
+world_sf <- ne_countries(scale = "large", type = "map_units", returnclass = "sf")
+
+# ---------------------------------------------------------
+# 1. Americas Map 
+# ---------------------------------------------------------
 plot_map_americas <- ggplot() +
-  geom_sf(data = world_sf, fill = "grey90", color = "white", linewidth = 0.01) +
-  geom_sf(data = h3_hexagons, aes(fill = Eco), color = "black", 
-          alpha = 0.8, linewidth = 0.1) +
+  geom_sf(data = world_sf, fill = "grey90", color = "grey65", linewidth = 0.3) +
+  geom_sf(data = h3_hexagons, aes(fill = n_species), alpha=0.8, color = "black", linewidth = 0.1) +
   coord_sf(crs = "+proj=robin", 
-           xlim = c(-14500000, -4500000),
-           ylim = c(1000000, 7000000)) +
-  scale_fill_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f", "Fre" = "#e9c46a")) +
+           xlim = c(-14500000, -4500000), ylim = c(1000000, 7000000)) +
+  scale_fill_viridis_c(
+    name = "Unique species", option = "viridis", direction = -1,      
+    guide = guide_colorbar(
+      direction = "horizontal", barwidth = unit(4, "cm"), barheight = unit(0.5, "cm"),
+      title.position = "top", title.hjust = 0.5, ticks.colour = "black", frame.colour = "black" 
+    )
+  ) +
   theme_minimal() +
-  labs(title = "A) Americas & Pacific") +
+  labs(title = "A) North America & Pacific", x = NULL, y = NULL) +
   theme(
     panel.background = element_rect(fill = "#e4f1f5", color = NA),
-    panel.border = element_blank(), 
-    axis.text = element_blank(),
-    # DOCK LEGEND INSIDE MAP (adjust x and y from 0 to 1)
-    legend.position = c(0.2, 0.2), 
-    legend.background = element_rect(fill = "white", color = "grey80"),
-    legend.title = element_blank()
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5), 
+    panel.grid.major = element_line(color = "grey80", linetype = "dashed", linewidth = 0.3),
+    plot.title.position = "plot",
+    # Margin fixed: no more negative margins needed with gridExtra!
+    plot.title = element_text(hjust = 0, face = "bold", size = 14, margin = margin(b = 5)),
+    axis.text = element_text(size = 8, color = "grey30"),
+    legend.position = c(0.2, 0.22), 
+    legend.background = element_rect(fill = "white", color = "black", linewidth = 0.3),
+    legend.title = element_text(size = 11, face = "bold"), 
+    legend.text = element_text(size = 10),           
+    legend.margin = margin(t = 8, r = 10, b = 8, l = 10), 
+    plot.margin = margin(10, 10, 10, 10)
   )
-plot_map_americas
 
-# 2. Europe Focus (No legend)
-plot_map_europe <- ggplot() +
-  geom_sf(data = world_sf, fill = "grey90", color = "white", linewidth = 0.01) +
-  geom_sf(data = h3_hexagons, aes(fill = Eco), color = "black", 
-          alpha = 0.8, linewidth = 0.1, show.legend = FALSE) +
-  coord_sf(crs = "+proj=robin", 
-           xlim = c(-1000000, 2000000),
-           ylim = c(3500000, 7500000)) +
-  scale_fill_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f", "Fre" = "#e9c46a")) +
+# ---------------------------------------------------------
+# 2. South Africa Inset (Converted to a grob for embedding)
+# ---------------------------------------------------------
+plot_map_sa <- ggplot() +
+  geom_sf(data = world_sf, fill = "grey90", color = "grey65", linewidth = 0.3) +
+  geom_sf(data = h3_hexagons, aes(fill = n_species), alpha=0.8, color = "black", 
+          linewidth = 0.1, show.legend = FALSE) +
+  coord_sf(crs = 4326, xlim = c(15, 35), ylim = c(-36, -22)) +
+  scale_fill_viridis_c(option = "viridis", direction = -1) +
   theme_minimal() +
-  labs(title = "B) Europe") +
+  labs(title = "C) South Africa", x = NULL, y = NULL) +
+  scale_y_continuous(breaks = seq(-40,-20, by = 4)) +
+  scale_x_continuous(breaks = seq(15,35, by = 10)) +
+  theme(
+    # Solid white background so Europe doesn't bleed through
+    plot.background = element_rect(fill = "white", color = "black", linewidth = 0.5), 
+    panel.background = element_rect(fill = "#e4f1f5", color = NA),
+    panel.grid.major = element_line(color = "grey80", linetype = "dashed", linewidth = 0.3),
+    plot.title.position = "plot",
+    plot.title = element_text(hjust = 0, face = "bold", size = 10, margin = margin(t = 2, b = 2, l = 2)),
+    axis.text = element_text(size = 6, color = "grey30"),
+    plot.margin = margin(2, 2, 2, 2)
+  )
+
+# Convert the SA map into a graphical object (grob)
+sa_grob <- ggplotGrob(plot_map_sa)
+
+# ---------------------------------------------------------
+# 3. Europe Focus (With Embedded SA Inset)
+# ---------------------------------------------------------
+plot_map_europe <- ggplot() +
+  geom_sf(data = world_sf, fill = "grey90", color = "grey65", linewidth = 0.3) +
+  geom_sf(data = h3_hexagons, aes(fill = n_species), alpha=0.8, color = "black", 
+          linewidth = 0.1, show.legend = FALSE) +
+  coord_sf(crs = "+proj=robin", 
+           xlim = c(-1000000, 2000000), ylim = c(3500000, 7500000)) +
+  scale_fill_viridis_c(option = "viridis", direction = -1) +
+  
+  # THE FIX: Embed the SA grob directly into the Europe map coordinates (Bottom Right)
+  annotation_custom(
+    grob = sa_grob, 
+    xmin = 500000, xmax = 2050000,  # Longitude coordinates for the Mediterranean
+    ymin = 3300000, ymax = 4700000  # Latitude coordinates for the Mediterranean
+  ) +
+  
+  theme_minimal() +
+  labs(title = "B) Europe", x = NULL, y = NULL) +
   theme(
     panel.background = element_rect(fill = "#e4f1f5", color = NA),
-    panel.border = element_blank(), 
-    axis.text = element_blank()
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5), 
+    panel.grid.major = element_line(color = "grey80", linetype = "dashed", linewidth = 0.3),
+    plot.title.position = "plot",
+    plot.title = element_text(hjust = 0, face = "bold", size = 14, margin = margin(b = 5)),
+    axis.text = element_text(size = 8, color = "grey30"),
+    plot.margin = margin(10, 10, 10, 10)
   )
 plot_map_europe
-# 3. South Africa Inset (No legend)
-plot_map_sa <- ggplot() +
-  geom_sf(data = world_sf, fill = "grey90", color = "white", linewidth = 0.01) +
-  geom_sf(data = h3_hexagons, aes(fill = Eco), 
-          color="black",alpha = 0.8, linewidth = 0.1, show.legend = FALSE) +
-  coord_sf(crs = 4326, xlim = c(15, 35), ylim = c(-40, -22)) +
-  scale_fill_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f", "Fre" = "#e9c46a")) +
-  theme_minimal() +
-  labs(title = "C) South Africa") +
-  theme(
-    panel.background = element_rect(fill = "#e4f1f5", color = NA),
-    panel.border = element_blank(), 
-    axis.text = element_blank()
-  )
-plot_map_sa
+# ---------------------------------------------------------
+# Assemble and Save via GridExtra
+# ---------------------------------------------------------
+# arrangeGrob prevents the plot from immediately drawing in the console, saving it straight to the object
+final_maps_only <- arrangeGrob(
+  plot_map_americas, plot_map_europe, 
+  ncol = 2, 
+  widths = c(1.6, 1) # Gives the Americas slightly more width to balance the aspect ratios perfectly
+)
 
-
-# THE FIX: Custom Text Design Layout
-# 'A' gets 3 columns of width, 'B' and 'C' get 2.
-# 'A' and 'B' span 2 rows of height, 'C' gets 1.
-custom_layout <- "
-  AAABB
-  AAABB
-  AAACC
-"
-
-final_maps_only <- plot_map_americas + plot_map_europe + plot_map_sa + 
-  plot_layout(design = custom_layout)
-
-final_maps_only
 ggsave("./stage_4_bind_biotime_bioshifts/maps.png", 
        plot = final_maps_only, 
-       width = 12, height = 10, dpi = 300, bg = "white")
+       width = 14, height = 7, dpi = 300, bg = "white")
 ```
+
