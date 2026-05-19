@@ -1,0 +1,39 @@
+---
+title: "stage_2_intersect_har_biotime_bioshifts"
+author: "Shahar Chaikin"
+date: "2026-05-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+```
+
+#1) Load Harmonized Data
+Note: In the previous steps, BioShifts was saved as a CSV, while BioTIME was saved as an RDS.
+```{r}
+# Load BioShifts (adjust path if you ended up saving it as an RDS instead)
+bioshifts_harmonized <- read_rds("./stage_1_species_harmo/bioshifts_harmonized.rds")
+
+# Load BioTIME
+biotime_harmonized <- read_rds("./stage_1_species_harmo/biotime_harmonized.rds")
+```
+
+#2) Intersect Datasets
+We will filter BioTIME to only include species that are present in the BioShifts dataset.
+```{r}
+# Extract the unique, harmonized species from BioShifts
+overlapping_species <- unique(bioshifts_harmonized$species_harmonized)
+
+# Filter BioTIME using the %in% operator
+biotime_intersect <- biotime_harmonized %>%
+  filter(species_harmonized %in% overlapping_species)
+
+# Check how much the dataset was reduced
+cat("Original BioTIME rows:", nrow(biotime_harmonized), "\n")
+cat("Intersected BioTIME rows:", nrow(biotime_intersect), "\n")
+cat("Number of overlapping species:", n_distinct(biotime_intersect$species_harmonized), "\n")
+
+saveRDS(biotime_intersect,"./stage_2_intersect_data/biotime_intersect.rds")
+```
+

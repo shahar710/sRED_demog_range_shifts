@@ -1,0 +1,164 @@
+---
+title: "stage_3_stand_biotime"
+author: "Shahar Chaikin"
+date: "2026-05-19"
+output: html_document
+---
+
+This script outlines the spatial and temporal standardization pipeline for the BioTIME dataset, preparing raw abundance records for time-series modeling. It defines distinct ecological populations by assigning sampling coordinates to spatial H3 hexagonal grid cells and standardizes intra-annual sampling effort by calculating mean Catch Per Unit Effort (CPUE). Crucially, the pipeline explicitly accounts for implicit non-detections by padding the dataset with "true zeros" derived from the local species pool, while intelligently truncating prolonged trailing zeros to reflect potential local extinctions. Finally, it filters the data to ensure sufficient temporal depth (at least three sampled years) and adequate sampling effort (minimum of four samples per year), yielding a clean, integer-based dataset optimized for count-based mixed-effects modeling.
+
+Libraries
+```{r}
+library(tidyverse)
+library(sf)
+library(h3jsr)
+```
+
+#1) Load intersect biotime data
+```{r}
+biotime_intersect=read_rds("./stage_2_intersect_data/biotime_intersect.rds")
+```
+
+# 2 Clean NAs and Optimize Spatial H3 Assignment
+```{r}
+# Extracting unique coordinates is infinitely faster than converting 5.4M rows to sf
+unique_coords <- biotime_intersect %>%
+  filter(!is.na(ABUNDANCE)) %>%
+  select(LONGITUDE, LATITUDE) %>%
+  distinct() %>%
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4326, remove = FALSE)
+
+# Assign H3 cells (Resolution 3) to the unique coordinates
+unique_coords$h3_id <- point_to_cell(unique_coords, res = 3)
+
+# Join the H3 IDs back to the main dataset, simultaneously dropping NAs
+biotime_spatial <- biotime_intersect %>%
+  filter(!is.na(ABUNDANCE)) %>%
+  left_join(
+    unique_coords %>% st_drop_geometry(), 
+    by = c("LONGITUDE", "LATITUDE")
+  )
+
+#free RAM
+rm(biotime_intersect)
+gc()
+```
+
+# 3) Define True Zeros (Implicit Non-Detections)
+Here we create a grid of all actual sampling events and cross-reference them with the known species pool for each location to expose true zeros.
+
+```{r}
+# Get all unique samples taken per study, location, and year
+all_samples <- biotime_spatial %>%
+  select(STUDY_ID, h3_id, YEAR, SAMPLE_DESC) %>%
+  distinct()
+
+# Get the unique "species pool" (and taxonomy) for each location
+species_pool <- biotime_spatial %>%
+  select(
+    STUDY_ID, h3_id, species_harmonized, taxonID, taxon, kingdom, phylum, class, order, family
+  ) %>%
+  distinct()
+
+# Cross-reference samples with the species pool to create the expected observation grid
+full_grid <- all_samples %>%
+  left_join(species_pool, by = c("STUDY_ID", "h3_id"), relationship = "many-to-many")
+
+# CRITICAL FIX: Pre-aggregate the raw abundances to sum up any split records in the same sample
+actual_abundances <- biotime_spatial %>%
+  group_by(SAMPLE_DESC, species_harmonized) %>%
+  summarise(ABUNDANCE = sum(ABUNDANCE, na.rm = TRUE), .groups = "drop")
+
+# Join the aggregated abundances into the grid, replacing NAs with 0
+biotime_zeros <- full_grid %>%
+  left_join(
+    actual_abundances,
+    by = c("SAMPLE_DESC", "species_harmonized")
+  ) %>%
+  mutate(ABUNDANCE = replace_na(ABUNDANCE, 0))
+
+# Free up RAM
+rm(all_samples, species_pool, full_grid, actual_abundances, biotime_spatial)
+gc()
+```
+
+#4) Standardize Effort & Calculate Mean Abundance
+Filter out years with insufficient sampling effort (minimum 4 samples) and calculate the standardized Catch Per Unit Effort (CPUE).
+
+```{r}
+biotime_ts <- biotime_zeros %>%
+  group_by(
+    STUDY_ID, h3_id, YEAR, species_harmonized, taxonID, taxon, kingdom, phylum, class, order, family
+  ) %>%
+  summarise(
+    mean_annual_abundance = mean(ABUNDANCE),
+    n_samples_available = n(),
+    .groups = "drop"
+  ) %>%
+  # Apply the minimum effort control
+  filter(n_samples_available >= 4) %>%
+  # Round to integer for downstream count-based mixed models (Poisson/NB)
+  mutate(mean_annual_abundance = round(mean_annual_abundance)) %>%
+  # Create the unique population identifier
+  mutate(
+    unique_pop_id = paste(STUDY_ID, h3_id, species_harmonized, sep = "_")
+  ) %>%
+  relocate(unique_pop_id)
+
+# Free up RAM
+rm(biotime_zeros)
+gc()
+```
+
+#5) Truncate Trailing Zeros
+If a species disappears from a location and yields more than 4 consecutive years of zeros at the end of its time series, we assume true absence/local extinction and truncate those trailing zeros.
+```{r}
+biotime_ts_final <- biotime_ts %>%
+  group_by(unique_pop_id) %>%
+  arrange(YEAR) %>%
+  mutate(
+    # Check if the species was ever present (safety check)
+    ever_present = any(mean_annual_abundance > 0),
+    
+    # Find the row index of the very last year it was detected
+    last_presence_idx = max(which(mean_annual_abundance > 0)),
+    
+    # Identify which rows are trailing zeros (occur after the last presence)
+    is_trailing_zero = row_number() > last_presence_idx,
+    
+    # Count the total number of trailing zeros at the end of the time series
+    total_trailing_zeros = sum(is_trailing_zero)
+  ) %>%
+  # Keep the row IF it is NOT a trailing zero, OR if the total trailing run is <= 4
+  filter(ever_present & (!is_trailing_zero | total_trailing_zeros <= 4)) %>%
+  # Clean up temporary calculation columns
+  select(-ever_present, -last_presence_idx, -is_trailing_zero, -total_trailing_zeros) %>%
+  ungroup()
+
+# Free up RAM
+rm(biotime_ts)
+gc()
+
+# Final structure check
+head(biotime_ts_final)
+```
+
+# 6) Minimum Time-Series Length Filter
+Keep only populations that have been sampled in at least 3 distinct years.
+
+```{r}
+biotime_ts_final <- biotime_ts_final %>%
+  group_by(unique_pop_id) %>%
+  filter(n() >= 3) %>%
+  ungroup()
+
+# Quick summary of the final dataset size
+cat("Final number of unique populations:", n_distinct(biotime_ts_final$unique_pop_id), "\n")
+cat("Total rows ready for modeling:", nrow(biotime_ts_final), "\n")
+```
+
+#7) Save Standardized Time Series
+```{r}
+# Save the final dataset
+saveRDS(biotime_ts_final, "./stage_3_std_biotime_intersect/biotime_ts_final.rds")
+```
