@@ -40,6 +40,10 @@ We extract the unique H3 cells from BioTIME, convert them to spatial points, and
 # Temporarily turn off the strict s2 spherical geometry engine
 sf_use_s2(FALSE)
 
+# Clean up any invalid geometries in the BioShifts polygons
+bioshifts_poly_clean <- bioshifts_poly %>% 
+  st_make_valid()
+
 # Extract unique H3 cells and convert to sf points
 h3_points <- biotime_ts %>%
   select(h3_id) %>%
@@ -112,6 +116,20 @@ saveRDS(final_dataset,"./stage_4_bind_biotime_bioshifts/final_dataset.rds")
 cat("Original BioTIME rows:", nrow(biotime_ts), "\n")
 cat("Final Integrated rows:", nrow(final_dataset), "\n")
 cat("Unique matched populations:", n_distinct(final_dataset$unique_pop_id), "\n")
+
+
+# ---------------------------------------------------------
+#Extract Target Species List for Occurrence Download
+# ---------------------------------------------------------
+# We only want to download occurrences for species that made it through the pipeline
+target_species_list <- final_dataset %>%
+  distinct(species_harmonized, taxonID,kingdom, phylum, class, order, family, Eco) %>%
+  arrange(class, species_harmonized)
+
+# Save this as a clean CSV or RDS to load into your new occurrence-fetching script
+write_csv(target_species_list, "./stage_4_bind_biotime_bioshifts/target_species_for_occurrences.csv")
+
+cat("Exported", nrow(target_species_list), "unique species for global occurrence extraction.\n")
 ```
 
 #4) Creating final_dataset_lite
@@ -126,7 +144,7 @@ final_dataset_lite <- final_dataset %>%
   select(
     unique_pop_id, h3_id, ID_BioShifts,
     YEAR, mean_annual_abundance, n_samples_available, total_sampled_years,
-    Type, Rate, UnitRate, Eco, Param, 
+    Type, Rate, UnitRate, Eco, Param,STUDY_ID, 
     LatCentDeg, LonCentDeg, # Both coordinates are safely included here
     species_harmonized, kingdom, phylum, class, order, family
   ) %>%
@@ -142,7 +160,7 @@ final_dataset_lite <- final_dataset %>%
     )
   )
 
-saveRDS(final_dataset_lite,"./stage_4_bind_biotime_bioshifts/final_dataset_lite.rds")
+#saveRDS(final_dataset_lite,"./stage_4_bind_biotime_bioshifts/final_dataset_lite.rds")
 # Check the memory savings
 cat("Full dataset size: ", format(object.size(final_dataset), units = "Mb"), "\n")
 cat("Lite dataset size: ", format(object.size(final_dataset_lite), units = "Mb"), "\n")
@@ -157,234 +175,224 @@ final_dataset_lite %>%
   summary(n_years)
 ```
 
+## Clean the dataset by resolving overlapping studies
+```{r}
+final_dataset_clean <- final_dataset_lite %>%
+  
+  # 1. Restrict to overall range shift parameters (Centroid or Optimum)
+  # This prevents comparing an expanding edge to a contracting edge
+  filter(Param %in% c("C", "O")) %>%
+  
+  # 2. Group by the unique BioTIME population
+  group_by(unique_pop_id) %>%
+  
+  # 3. Sort by a logical tie-breaker (e.g., which study has more sampled years)
+  # If you calculated spatial distance between the H3 cell and the BioShifts centroid, 
+  # you would arrange(spatial_mismatch_km) here instead!
+  arrange(desc(total_sampled_years)) %>% 
+  
+  # 4. Keep only the top row per population
+  # This guarantees 1 population = 1 Rate = 1 ID_BioShifts
+  slice(1) %>%
+  
+  ungroup()
+
+final_dataset_clean$unique_pop_id %>% n_distinct()
+final_dataset_clean$species_harmonized %>% n_distinct()
+#saveRDS(final_dataset_clean,"./stage_4_bind_biotime_bioshifts/final_dataset_clean.rds")
+```
+
+
+```{r}
+# Check for populations tagged with multiple Range Positions within the same study area
+overlap_check <- final_dataset_clean %>%
+  # Get just the unique combinations of population, study area, and parameter
+  select(unique_pop_id, ID_BioShifts, Param) %>%
+  distinct() %>%
+  group_by(unique_pop_id, ID_BioShifts) %>%
+  # Filter for populations that have more than 1 parameter assigned
+  filter(n() > 1) %>%
+  arrange(unique_pop_id)
+
+cat("Number of populations duplicating across Range Positions:", n_distinct(overlap_check$unique_pop_id), "\n")
+```
+
 #5) Visualizations
 ```{r}
 # ---------------------------------------------------------
 # 1. Quick Summary Statistics (The Raw Numbers)
 # ---------------------------------------------------------
-cat("Total Unique Populations:", n_distinct(final_dataset_lite$unique_pop_id), "\n")
-cat("Total Unique Species:", n_distinct(final_dataset_lite$species_harmonized), "\n")
-cat("Total BioShifts Polygons Mapped:", n_distinct(final_dataset_lite$ID_BioShifts), "\n")
+cat("Total Unique Populations:", n_distinct(final_dataset_clean$unique_pop_id), "\n")
+cat("Total Unique Species:", n_distinct(final_dataset_clean$species_harmonized), "\n")
+cat("Total BioShifts Polygons Mapped:", n_distinct(final_dataset_clean$ID_BioShifts), "\n")
 ```
 
 ##data 
 ```{r}
 # Calculate the grand totals
-total_pops <- n_distinct(final_dataset_lite$unique_pop_id)
-total_species <- n_distinct(final_dataset_lite$species_harmonized)
+total_pops <- n_distinct(final_dataset_clean$unique_pop_id)
+total_species <- n_distinct(final_dataset_clean$species_harmonized)
 
-# 1. Prepare data for the taxonomy plot to find the max value for text placement
-taxa_data <- final_dataset_lite %>%
-  distinct(unique_pop_id, class) %>%
-  filter(!is.na(class)) %>%
-  count(class, sort = TRUE) %>%
-  slice_max(n, n = 10)
+# 1. Prepare data for the taxonomy plot
+taxa_data <- final_dataset_clean %>%
+  distinct(unique_pop_id, class, Eco) %>%
+  filter(!is.na(class), !is.na(Eco)) %>%
+  # Count how many populations belong to each class-realm combination
+  count(class, Eco) %>%
+  # Group by class to calculate the total populations per class
+  group_by(class) %>%
+  mutate(total_n = sum(n)) %>%
+  ungroup() %>%
+  # Keep only the top 10 classes based on their total counts
+  filter(dense_rank(desc(total_n)) <= 10)
 
-max_pop_n <- max(taxa_data$n)
+max_pop_n <- max(taxa_data$total_n)
 
-# PLOT B: Taxonomic Richness (Populations per Class)
+# ---------------------------------------------------------
+# PLOT A: Taxonomic Richness
+# ---------------------------------------------------------
 plot_taxa <- taxa_data %>%
-  ggplot(aes(x = reorder(class, n), y = n)) +
-  geom_col(fill = "#e76f51", color = "black", alpha = 0.8) +
-  geom_text(aes(label = n), hjust = -0.2, size = 3.5) +
+  ggplot(aes(x = reorder(class, total_n), y = n, fill = Eco)) +
+  geom_col(color = "black", alpha = 0.8) +
+  
+  # Text labels for the total count per bar
+  geom_text(
+    data = taxa_data %>% distinct(class, total_n),
+    aes(x = reorder(class, total_n), y = total_n, label = total_n),
+    hjust = -0.2, size = 3.5, inherit.aes = FALSE
+  ) +
+  
   coord_flip() + 
-  # Expand the y-axis a bit more to fit the annotation
-  scale_y_continuous(expand = expansion(mult = c(0, 0.25))) +
-  # ADD TEXT INSIDE PLOT: Positioned in the bottom right corner
-  annotate("text", x = 1.5, y = max_pop_n * 1.1, 
-           label = paste("Unique populations =", total_pops), 
-           hjust = 1, size = 4, fontface = "bold", color = "grey30") +
-  theme_minimal() +
-  labs(title = "B) Top 10 classes by population count",
-       x = "Taxonomic class", y = "Number of populations")
+  
+  scale_fill_manual(
+    values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f", "Fre" = "#e9c46a"),
+    labels = c("Mar" = "Marine", "Ter" = "Terrestrial", "Fre" = "Freshwater")
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15)))+
 
-# 2. Prepare data for the ecosystem species plot to find the max value
-eco_species_data <- final_dataset_lite %>%
+  theme_bw() +
+  labs(
+    title = "A) Top 10 classes by population count",
+    caption = paste("Unique populations =", total_pops), # Added to caption
+    x = "Taxonomic class", 
+    y = "Unique populations",
+    fill = "Realm"
+  ) +
+  theme(
+    # Move legend inside the plot area (bottom right)
+    legend.position = c(0.85, 0.15), 
+    # Add a white background with a subtle border so it pops against grid lines
+    legend.background = element_rect(fill = "white", color = "grey60", linewidth = 0.3),
+    legend.title = element_text(face = "bold", size = 10),
+    legend.text = element_text(size = 9),
+    # Adjust caption formatting to make it look clean
+    plot.caption = element_text(size = 10, face = "bold", color = "grey30", hjust = 1)
+  ) 
+
+plot_taxa
+
+# ---------------------------------------------------------
+# 2. Prepare data for the realm species plot
+# ---------------------------------------------------------
+eco_species_data <- final_dataset_clean %>%
   distinct(species_harmonized, Eco) %>%
   count(Eco)
 
 max_eco_n <- max(eco_species_data$n)
 
-# PLOT D: Unique Species by Ecosystem
+# ---------------------------------------------------------
+# PLOT B: Unique Species by Realm
+# ---------------------------------------------------------
 plot_eco_species <- eco_species_data %>%
   ggplot(aes(x = Eco, y = n, fill = Eco)) +
   geom_col(color = "black", alpha = 0.8) +
   geom_text(aes(label = n), vjust = -0.5, size = 3.5) +
-  scale_fill_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f", "Fre" = "#e9c46a")) +
-  # Expand the y-axis to fit the annotation above the bars
+  scale_fill_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f")) +
+  scale_x_discrete(labels = c("Mar" = "Marine", "Ter" = "Terrestrial")) +
   scale_y_continuous(expand = expansion(mult = c(0, 0.25))) +
-  # ADD TEXT INSIDE PLOT: Positioned top center
-  annotate("text", x = 0.8, y = max_eco_n * 1.1, 
-           label = paste("Unique species =", total_species), 
-           size = 4, fontface = "bold", color = "grey30") +
-  theme_minimal() +
-  labs(title = "D) Unique species by ecosystem",
-       x = "Ecosystem", y = "Number of unique species") +
-  theme(legend.position = "none")
+  theme_bw() +
+  labs(
+    title = "B) Unique species by realm",
+    caption = paste("Unique species =", total_species), # Added to caption
+    x = "Realm", 
+    y = "Number of unique species"
+  ) +
+  theme(
+    legend.position = "none",
+    # Match the caption styling of Plot A
+    plot.caption = element_text(size = 10, face = "bold", color = "grey30", hjust = 1)
+  )
+
 plot_eco_species
+
+# ---------------------------------------------------------
+# 3. Prepare data for the temporal distribution plot
+# ---------------------------------------------------------
+duration_data <- final_dataset_clean %>%
+  distinct(unique_pop_id, total_sampled_years)
+
+median_duration <- median(duration_data$total_sampled_years, na.rm = TRUE)
+
+# ---------------------------------------------------------
+# PLOT C: Distribution of Sampled Years
+# ---------------------------------------------------------
+plot_years <- duration_data %>%
+  ggplot(aes(x = total_sampled_years)) +
+  # Using a distinct color from your palette to separate it from the realm plots
+  geom_histogram(fill = "#e76f51", color = "black", binwidth = 5, alpha = 0.8) +
+  
+  # Add a dashed line to indicate the median
+  geom_linerange(aes(x = median_duration,ymin=0,ymax=2200),
+                 linetype = "dashed", color = "grey30", linewidth = 0.8) +
+  
+  # Annotate the median value near the top of the line
+  annotate("text", x = median_duration + 1, y = Inf, 
+           label = paste("Median =", median_duration, "years"), 
+           hjust = 0, vjust = 2, size = 4, fontface = "bold", color = "grey30") +
+  
+  theme_bw() +
+  labs(
+    title = "C) Distribution of sampled years",
+    x = "Number of unique years sampled",
+    y = "Unique populations"
+  ) +
+  theme(
+    # Keeping styling consistent with the other panels
+    plot.title = element_text(hjust = 0)
+  )
+
+plot_years
 ```
 
-```{r}
-# PLOT D: Unique Species by Ecosystem (CORRECTED)
-plot_eco_species <- eco_species_data %>%
-  ggplot(aes(x = Eco, y = n, fill = Eco)) +
-  # ADDED show.legend = FALSE here
-  geom_col(color = "black", alpha = 0.8, show.legend = FALSE) + 
-  geom_text(aes(label = n), vjust = -0.5, size = 3.5) +
-  scale_fill_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f", "Fre" = "#e9c46a")) +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.25))) +
-  annotate("text", x = 0.8, y = max_eco_n * 1.1, 
-           label = paste("Unique species =", total_species), 
-           size = 4, fontface = "bold", color = "grey30") +
-  theme_minimal() +
-  labs(title = "D) Unique species by ecosystem",
-       x = "Ecosystem", y = "Number of unique species")
-  # Removed theme(legend.position = "none") as it is no longer needed
-
-# PLOT C: Populations by Range Position (CORRECTED)
-plot_edges <- final_dataset_lite %>%
-  distinct(unique_pop_id, Range_Position) %>%
-  ggplot(aes(x = Range_Position, fill = Range_Position)) +
-  # ADDED show.legend = FALSE here
-  geom_bar(color = "black", alpha = 0.8, show.legend = FALSE) + 
-  scale_fill_manual(values = c("Leading_Edge" = "#4d4d4d", 
-                               "Trailing_Edge" = "#999999", 
-                               "Centroid" = "#cccccc", 
-                               "Optimum" = "#666666")) +
-  theme_minimal() +
-  labs(title = "C) Populations by range position",
-       x = "Measured edge", y = "Number of populations")
-  # Removed theme(legend.position = "none") as it is no longer needed
-```
 
 Bind
 ```{r}
-attribute_panel <- (plot_eco_type | plot_taxa) / (plot_edges | plot_eco_species) +
-  plot_layout(guides = "collect") & 
-  theme(legend.position = "bottom")
+library(gridExtra)
 
-attribute_panel
+combined_panel <- arrangeGrob(
+  plot_taxa, 
+  arrangeGrob(plot_eco_species, plot_years, ncol = 1), 
+  ncol = 2,
+  widths = c(1.3, 1) # Gives the taxa plot slightly more horizontal space for the long labels
+)
 
-ggsave("./stage_4_bind_biotime_bioshifts/Figure_Attribute_Panel.png", 
-       plot = attribute_panel, 
-       width = 12, height = 10, dpi = 300, bg = "white")
+# Display the combined plot in the viewer
+grid::grid.draw(combined_panel)
+
+# Save the final 3-panel figure
+ggsave("./stage_4_bind_biotime_bioshifts/Taxa_Realm_Duration_Panel.png", 
+       plot = combined_panel, 
+       width = 12, height = 6, dpi = 300, bg = "white")
 ```
-
 
 ##Maps
-```{r}
-# 1. Convert your unique H3 IDs into exact hexagonal spatial polygons
-h3_hexagons <- final_dataset_lite %>%
-  distinct(h3_id, Eco)
-
-# Extract raw polygons and convert to sf
-h3_hexagons$geometry <- cell_to_polygon(h3_hexagons$h3_id, simple = TRUE)
-h3_hexagons <- st_as_sf(h3_hexagons, crs = 4326)
-
-# THE FIX: Split polygons that cross the International Date Line
-h3_hexagons <- st_wrap_dateline(h3_hexagons)
-
-world_sf <- ne_countries(scale = "large", type = "map_units", returnclass = "sf")# 1. Americas & Pacific 
-
-```
-
-
-```{r}
-# 1. Americas Map 
-plot_map_americas <- ggplot() +
-  geom_sf(data = world_sf, fill = "grey90", color = "grey65", linewidth = 0.3) +
-  geom_sf(data = h3_hexagons, aes(fill = Eco), color = "black", 
-          alpha = 0.8, linewidth = 0.1) +
-  coord_sf(crs = "+proj=robin", 
-           xlim = c(-14500000, -4500000), ylim = c(1000000, 7000000)) +
-  theme_minimal() +
-  scale_fill_manual(
-    values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f", "Fre" = "#e9c46a"),
-    labels = c("Mar" = "Marine", "Ter" = "Terrestrial", "Fre" = "Freshwater")
-  ) +
-  labs(title = "A) Americas & Pacific", x = NULL, y = NULL) +
-  theme(
-    panel.background = element_rect(fill = "#e4f1f5", color = NA),
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5), 
-    panel.grid.major = element_line(color = "grey80", linetype = "dashed", linewidth = 0.3),
-    plot.title = element_text(hjust = 0.5, face = "bold", size = 14, margin = margin(t = 10, b = -20)),
-    axis.text = element_text(size = 8, color = "grey30"),
-    
-    # THE FIX 2: Enlarge the legend elements
-    legend.position = c(0.18, 0.22), # Shifted slightly up/right to accommodate larger size
-    legend.background = element_rect(fill = "white", color = "black", linewidth = 0.3),
-    legend.title = element_blank(),
-    legend.text = element_text(size = 11),           # Larger text font
-    legend.key.size = unit(1.5, "lines"),            # Larger color boxes
-    legend.margin = margin(t = 6, r = 8, b = 6, l = 8), # Padding inside the white box
-    
-    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
-  )
-
-# 2. Europe Focus 
-plot_map_europe <- ggplot() +
-  geom_sf(data = world_sf, fill = "grey90", color = "grey65", linewidth = 0.3) +
-  geom_sf(data = h3_hexagons, aes(fill = Eco), color = "black", 
-          alpha = 0.8, linewidth = 0.1, show.legend = FALSE) +
-  coord_sf(crs = "+proj=robin", 
-           xlim = c(-1000000, 2000000), ylim = c(3500000, 7500000)) +
-  scale_fill_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f", "Fre" = "#e9c46a")) +
-  theme_minimal() +
-  labs(title = "B) Europe", x = NULL, y = NULL) +
-  theme(
-    panel.background = element_rect(fill = "#e4f1f5", color = NA),
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5), 
-    panel.grid.major = element_line(color = "grey80", linetype = "dashed", linewidth = 0.3),
-    # THE FIX: Negative bottom margin
-    plot.title = element_text(hjust = 0.5, face = "bold", size = 14, margin = margin(t = 10, b = -20)),
-    axis.text = element_text(size = 8, color = "grey30"),
-    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
-  )
-
-# 3. South Africa Inset 
-plot_map_sa <- ggplot() +
-  geom_sf(data = world_sf, fill = "grey90", color = "grey65", linewidth = 0.3) +
-  geom_sf(data = h3_hexagons, aes(fill = Eco), 
-          color="black", alpha = 0.8, linewidth = 0.1, show.legend = FALSE) +
-  coord_sf(crs = 4326, xlim = c(15, 35), ylim = c(-40, -22)) +
-  scale_fill_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f", "Fre" = "#e9c46a")) +
-  theme_minimal() +
-  labs(title = "C) South Africa", x = NULL, y = NULL) +
-  theme(
-    panel.background = element_rect(fill = "#e4f1f5", color = NA),
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5), 
-    panel.grid.major = element_line(color = "grey80", linetype = "dashed", linewidth = 0.3),
-    # THE FIX: Negative bottom margin
-    plot.title = element_text(hjust = 0.5, face = "bold", size = 14, margin = margin(t = 10, b = -20)),
-    axis.text = element_text(size = 8, color = "grey30"),
-    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
-  )
-
-# Assemble and Save
-library(patchwork)
-custom_layout <- "
-  AAABB
-  AAABB
-  AAACC
-"
-
-final_maps_only <- plot_map_americas + plot_map_europe + plot_map_sa + 
-  plot_layout(design = custom_layout)
-
-final_maps_only
-
-ggsave("./stage_4_bind_biotime_bioshifts/maps.png", 
-       plot = final_maps_only, 
-       width = 14, height = 10, dpi = 300, bg = "white")
-```
-
 ```{r}
 library(gridExtra)
 library(grid)
 
 ## Maps
 # 1. Calculate unique species per H3 hexagon
-h3_hexagons <- final_dataset_lite %>%
+h3_hexagons <- final_dataset_clean %>%
   group_by(h3_id) %>%
   summarise(n_species = n_distinct(species_harmonized), .groups = "drop")
 
