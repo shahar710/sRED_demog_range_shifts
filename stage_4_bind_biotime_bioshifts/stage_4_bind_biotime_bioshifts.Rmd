@@ -307,19 +307,19 @@ saveRDS(master_population_slopes, "./stage_4_bind_biotime_bioshifts/master_popul
 # ---------------------------------------------------------
 # 1. Quick Summary Statistics (The Raw Numbers)
 # ---------------------------------------------------------
-cat("Total Unique Populations:", n_distinct(final_dataset_clean$unique_pop_id), "\n")
-cat("Total Unique Species:", n_distinct(final_dataset_clean$species_harmonized), "\n")
-cat("Total BioShifts Polygons Mapped:", n_distinct(final_dataset_clean$ID_BioShifts), "\n")
+cat("Total Unique Populations:", n_distinct(master_population_slopes$unique_pop_id), "\n")
+cat("Total Unique Species:", n_distinct(master_population_slopes$species_harmonized), "\n")
+cat("Total BioShifts Polygons Mapped:", n_distinct(master_population_slopes$ID_BioShifts), "\n")
 ```
 
 ##data 
 ```{r}
 # Calculate the grand totals
-total_pops <- n_distinct(final_dataset_clean$unique_pop_id)
-total_species <- n_distinct(final_dataset_clean$species_harmonized)
+total_pops <- n_distinct(master_population_slopes$unique_pop_id)
+total_species <- n_distinct(master_population_slopes$species_harmonized)
 
 # 1. Prepare data for the taxonomy plot
-taxa_data <- final_dataset_clean %>%
+taxa_data <- master_population_slopes %>%
   distinct(unique_pop_id, class, Eco) %>%
   filter(!is.na(class), !is.na(Eco)) %>%
   # Count how many populations belong to each class-realm combination
@@ -379,7 +379,7 @@ plot_taxa
 # ---------------------------------------------------------
 # 2. Prepare data for the realm species plot
 # ---------------------------------------------------------
-eco_species_data <- final_dataset_clean %>%
+eco_species_data <- master_population_slopes %>%
   distinct(species_harmonized, Eco) %>%
   count(Eco)
 
@@ -413,7 +413,7 @@ plot_eco_species
 # ---------------------------------------------------------
 # 3. Prepare data for the temporal distribution plot
 # ---------------------------------------------------------
-duration_data <- final_dataset_clean %>%
+duration_data <- master_population_slopes %>%
   distinct(unique_pop_id, total_sampled_years)
 
 median_duration <- median(duration_data$total_sampled_years, na.rm = TRUE)
@@ -470,6 +470,74 @@ ggsave("./stage_4_bind_biotime_bioshifts/Taxa_Realm_Duration_Panel.png",
        width = 12, height = 6, dpi = 300, bg = "white")
 ```
 
+##slopes
+```{r}
+# ---------------------------------------------------------
+# Plot: Distribution of Abundance Slopes by Realm
+# ---------------------------------------------------------
+
+# 1. Prepare the data and calculate the medians for the annotations
+plot_slope_data <- master_population_slopes %>%
+  # Filter to our target realms
+  filter(Eco %in% c("Mar", "Ter")) %>%
+  # Create a clean factor for the facet labels
+  mutate(Eco_label = factor(if_else(Eco == "Mar", "Marine", "Terrestrial"), 
+                            levels = c("Marine", "Terrestrial")))
+
+# Calculate the medians separately for the dashed lines
+slope_medians <- plot_slope_data %>%
+  group_by(Eco_label) %>%
+  summarise(median_slope = median(slope, na.rm = TRUE), .groups = "drop")
+
+# 2. Build the two-panel figure
+plot_slope_hist <- ggplot(plot_slope_data, aes(x = slope, fill = Eco_label)) +
+  
+  # Add the histogram with high-resolution bins
+  geom_histogram(bins = 120, color = "black", linewidth = 0.2, alpha = 0.8) +
+  
+  # Add a bold dashed line for the median
+  geom_vline(data = slope_medians, aes(xintercept = median_slope),
+             linetype = "dashed", color = "grey20", linewidth = 0.8) +
+  
+  # Annotate the exact median value
+  geom_text(data = slope_medians, aes(x = median_slope, y = Inf, 
+                                      label = paste("Median =", round(median_slope, 3))),
+            vjust = 1.5, hjust = -0.1, size = 4, fontface = "bold", color = "grey20") +
+  
+  # Stack the plots vertically (ncol = 1) and allow the y-axes to scale independently
+  # since Marine and Terrestrial likely have different total population counts
+  facet_wrap(~ Eco_label, ncol = 1, scales = "free_y") +
+  
+  # Match your existing color palette perfectly
+  scale_fill_manual(values = c("Marine" = "#0077b6", "Terrestrial" = "#2a9d8f")) +
+  
+  # Zoom in on the biological reality (hiding extreme mathematical outliers)
+  coord_cartesian(xlim = c(-0.5, 0.5)) +
+  
+  # Clean, academic theme
+  theme_bw() +
+  labs(
+    x = "Temporal abunadnce trend (annual slope)",
+    y = "Number of populations"
+  ) +
+  theme(
+    legend.position = "none",
+    strip.background = element_rect(fill = "grey90", color = "grey30", linewidth = 0.5),
+    strip.text = element_text(face = "bold", size = 12),
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(color = "grey30")
+  )
+
+# View the plot
+print(plot_slope_hist)
+
+# Save the plot to your directory
+ggsave("./stage_4_bind_biotime_bioshifts/Slope_Distribution_Panel.png", 
+       plot = plot_slope_hist, 
+       width = 8, height = 5, dpi = 300, bg = "white")
+```
+
 ##Maps
 ```{r}
 library(gridExtra)
@@ -477,7 +545,7 @@ library(grid)
 
 ## Maps
 # 1. Calculate unique species per H3 hexagon
-h3_hexagons <- final_dataset_clean %>%
+h3_hexagons <- master_population_slopes %>%
   group_by(h3_id) %>%
   summarise(n_species = n_distinct(species_harmonized), .groups = "drop")
 
