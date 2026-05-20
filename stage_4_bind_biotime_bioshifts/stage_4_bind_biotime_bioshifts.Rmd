@@ -175,55 +175,134 @@ final_dataset_lite %>%
   summary(n_years)
 ```
 
-## Clean the dataset by resolving overlapping studies
+# 5. Resolve Overlaps (The "Winning Tickets")
+ Clean the dataset by resolving overlapping studies
 ```{r}
-## Clean the dataset by resolving overlapping studies while preserving shift dimensions
+
+# We create a dictionary of the best BioShifts study per population & shift type
 final_dataset_clean <- final_dataset_lite %>%
   
   # 1. Restrict to overall range shift parameters (Centroid or Optimum)
-  # This prevents comparing an expanding edge to a contracting edge
   filter(Param %in% c("C", "O")) %>%
   
-  # 2. Group by BOTH the unique BioTIME population AND the shift Type
-  # This ensures we keep the best LAT, the best ELE, and the best DEP for each population if they exist
+  # 2. Group by BOTH the unique BioTIME population AND the shift Type (LAT, ELE, DEP)
   group_by(unique_pop_id, Type) %>%
   
-  # 3. Sort by highest temporal overlap percentage!
-  # This mathematically guarantees we keep the study that best matches the BioTIME sampling window
+  # 3. Sort by highest temporal overlap percentage
   arrange(desc(perc_in_window)) %>% 
   
-  # 4. Keep only the top row per population-type combination
+  # 4. Keep only the top row (the best matching study)
   slice(1) %>%
   
   ungroup()
-
-# Diagnostics to verify the retention of different shift types
-cat("Total unique populations remaining:", n_distinct(final_dataset_clean$unique_pop_id), "\n")
-cat("Total species remaining:", n_distinct(final_dataset_clean$species_harmonized), "\n")
-
-# Check the distribution of preserved shift types (You should see LAT, ELE, and DEP here!)
-table(final_dataset_clean$Type)
-
-# Save the clean master dataset
-saveRDS(final_dataset_clean, "./stage_4_bind_biotime_bioshifts/final_dataset_clean.rds")
 ```
 
-
+# 6) Extract the Population Slopes
 ```{r}
-# Check for populations tagged with multiple Range Positions within the same study area
-overlap_check <- final_dataset_clean %>%
-  # Get just the unique combinations of population, study area, and parameter
-  select(unique_pop_id, ID_BioShifts, Param) %>%
-  distinct() %>%
-  group_by(unique_pop_id, ID_BioShifts) %>%
-  # Filter for populations that have more than 1 parameter assigned
-  filter(n() > 1) %>%
-  arrange(unique_pop_id)
+library(broom.mixed)
 
-cat("Number of populations duplicating across Range Positions:", n_distinct(overlap_check$unique_pop_id), "\n")
+# 6a. Recover the Full Time-Series for the winning combinations
+master_time_series <- final_dataset_lite %>%
+  semi_join(final_dataset_clean, by = c("unique_pop_id", "ID_BioShifts", "Type", "Param"))
+# Save the clean master dataset
+saveRDS(master_time_series, "./stage_4_bind_biotime_bioshifts/master_time_series.rds")
 ```
 
-#5) Visualizations
+Define the Smart Fallback Modeling Function (Tracking Model Type)
+```{r}
+extract_population_trend <- function(df) {
+  
+  # Helper function to safely extract coefficients and append the model type
+  safe_extract <- function(mod, model_name, is_lm = FALSE) {
+    if (is_lm) {
+      coefs <- summary(mod)$coefficients
+      slope <- coefs["YEAR", "Estimate"]
+      se <- coefs["YEAR", "Std. Error"]
+    } else {
+      coefs <- summary(mod)$coefficients$cond
+      slope <- coefs["YEAR", "Estimate"]
+      se <- coefs["YEAR", "Std. Error"]
+    }
+    
+    # If the Hessian failed, SE will be NaN. Throw an error to trigger the next fallback.
+    if (is.na(se) | is.nan(se)) stop("Invalid Standard Error")
+    
+    # Return the data with the new model_type column
+    return(tibble(slope = slope, se = se, model_type = model_name))
+  }
+  
+  # Check if the time-series actually contains zeros
+  has_zeros <- any(df$mean_annual_abundance == 0)
+  
+  # ATTEMPT 1: Zero-Inflated Negative Binomial (Only run if zeros exist)
+  if (has_zeros) {
+    res <- tryCatch({
+      mod <- glmmTMB(mean_annual_abundance ~ YEAR, ziformula = ~ 1, family = nbinom2(link = "log"), data = df)
+      safe_extract(mod, "ZINB")
+    }, error = function(e) NULL)
+    if (!is.null(res)) return(res)
+  }
+  
+  # ATTEMPT 2: Standard Negative Binomial (Drops zero-inflation overhead)
+  res <- tryCatch({
+    mod <- glmmTMB(mean_annual_abundance ~ YEAR, family = nbinom2(link = "log"), data = df)
+    safe_extract(mod, "NB2")
+  }, error = function(e) NULL)
+  if (!is.null(res)) return(res)
+  
+  # ATTEMPT 3: Poisson (Drops the dispersion parameter overhead)
+  res <- tryCatch({
+    mod <- glmmTMB(mean_annual_abundance ~ YEAR, family = poisson(link = "log"), data = df)
+    safe_extract(mod, "Poisson")
+  }, error = function(e) NULL)
+  if (!is.null(res)) return(res)
+  
+  # ATTEMPT 4: Gaussian log-linear (The ultimate safety net)
+  res <- tryCatch({
+    mod <- lm(log1p(mean_annual_abundance) ~ YEAR, data = df)
+    safe_extract(mod, "Gaussian_log1p", is_lm = TRUE)
+  }, error = function(e) tibble(slope = NA_real_, se = NA_real_, model_type = "Failed"))
+  
+  return(res)
+}
+
+# Run the loop across all populations 
+master_slopes_raw <- master_time_series %>%
+  group_by(unique_pop_id, Type) %>% 
+  nest() %>%
+  
+  # THE FIX: suppressWarnings goes INSIDE the mutate, wrapping the map function!
+  mutate(trend = suppressWarnings(map(data, extract_population_trend))) %>%
+  
+  unnest(trend) %>%
+  select(-data) %>%
+  ungroup() %>%
+  
+  # Drop the extreme edge cases that still failed
+  filter(!is.na(slope), !is.na(se)) %>%
+  
+  # Calculate precision weight (Inverse Variance) for the meta-analysis
+  mutate(inv_var_weight = 1 / (se^2))
+
+cat("Rescued dataset now contains slopes for", n_distinct(master_slopes_raw$unique_pop_id), "populations.\n")
+
+
+# Merge Metadata and Finalize Master Dataset
+# Drop time-varying columns from the clean dictionary
+metadata_to_merge <- final_dataset_clean %>%
+  select(-YEAR, -mean_annual_abundance)
+
+# Join the rich metadata back to the calculated slopes
+master_population_slopes <- master_slopes_raw %>%
+  left_join(metadata_to_merge, by = c("unique_pop_id", "Type"))
+
+cat("Successfully calculated master slopes for", nrow(master_population_slopes), "populations.\n")
+
+# Save the ultimate master file
+saveRDS(master_population_slopes, "./stage_4_bind_biotime_bioshifts/master_population_slopes.rds")
+```
+
+#6) Visualizations
 ```{r}
 # ---------------------------------------------------------
 # 1. Quick Summary Statistics (The Raw Numbers)
