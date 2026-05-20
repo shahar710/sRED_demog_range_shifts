@@ -64,7 +64,7 @@ species_pool <- biotime_spatial %>%
 full_grid <- all_samples %>%
   left_join(species_pool, by = c("STUDY_ID", "h3_id"), relationship = "many-to-many")
 
-# CRITICAL FIX: Pre-aggregate the raw abundances to sum up any split records in the same sample
+# re-aggregate the raw abundances to sum up any split records in the same sample
 actual_abundances <- biotime_spatial %>%
   group_by(SAMPLE_DESC, species_harmonized) %>%
   summarise(ABUNDANCE = sum(ABUNDANCE, na.rm = TRUE), .groups = "drop")

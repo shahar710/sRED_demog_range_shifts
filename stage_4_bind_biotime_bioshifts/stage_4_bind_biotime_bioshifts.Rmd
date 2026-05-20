@@ -101,7 +101,7 @@ final_dataset <- integrated_data %>%
   ungroup() %>%
   
   # Clean up calculation columns
-  select(-is_in_window, -years_in_window, -perc_in_window)
+  select(-is_in_window, -years_in_window)
 
 
 final_dataset <- final_dataset %>%
@@ -143,7 +143,7 @@ final_dataset_lite <- final_dataset %>%
   # 2. Select the essential columns (including LonCentDeg this time!)
   select(
     unique_pop_id, h3_id, ID_BioShifts,
-    YEAR, mean_annual_abundance, n_samples_available, total_sampled_years,
+    YEAR, mean_annual_abundance, n_samples_available, total_sampled_years,perc_in_window,
     Type, Rate, UnitRate, Eco, Param,STUDY_ID, 
     LatCentDeg, LonCentDeg, # Both coordinates are safely included here
     species_harmonized, kingdom, phylum, class, order, family
@@ -177,29 +177,35 @@ final_dataset_lite %>%
 
 ## Clean the dataset by resolving overlapping studies
 ```{r}
+## Clean the dataset by resolving overlapping studies while preserving shift dimensions
 final_dataset_clean <- final_dataset_lite %>%
   
   # 1. Restrict to overall range shift parameters (Centroid or Optimum)
   # This prevents comparing an expanding edge to a contracting edge
   filter(Param %in% c("C", "O")) %>%
   
-  # 2. Group by the unique BioTIME population
-  group_by(unique_pop_id) %>%
+  # 2. Group by BOTH the unique BioTIME population AND the shift Type
+  # This ensures we keep the best LAT, the best ELE, and the best DEP for each population if they exist
+  group_by(unique_pop_id, Type) %>%
   
-  # 3. Sort by a logical tie-breaker (e.g., which study has more sampled years)
-  # If you calculated spatial distance between the H3 cell and the BioShifts centroid, 
-  # you would arrange(spatial_mismatch_km) here instead!
-  arrange(desc(total_sampled_years)) %>% 
+  # 3. Sort by highest temporal overlap percentage!
+  # This mathematically guarantees we keep the study that best matches the BioTIME sampling window
+  arrange(desc(perc_in_window)) %>% 
   
-  # 4. Keep only the top row per population
-  # This guarantees 1 population = 1 Rate = 1 ID_BioShifts
+  # 4. Keep only the top row per population-type combination
   slice(1) %>%
   
   ungroup()
 
-final_dataset_clean$unique_pop_id %>% n_distinct()
-final_dataset_clean$species_harmonized %>% n_distinct()
-#saveRDS(final_dataset_clean,"./stage_4_bind_biotime_bioshifts/final_dataset_clean.rds")
+# Diagnostics to verify the retention of different shift types
+cat("Total unique populations remaining:", n_distinct(final_dataset_clean$unique_pop_id), "\n")
+cat("Total species remaining:", n_distinct(final_dataset_clean$species_harmonized), "\n")
+
+# Check the distribution of preserved shift types (You should see LAT, ELE, and DEP here!)
+table(final_dataset_clean$Type)
+
+# Save the clean master dataset
+saveRDS(final_dataset_clean, "./stage_4_bind_biotime_bioshifts/final_dataset_clean.rds")
 ```
 
 
