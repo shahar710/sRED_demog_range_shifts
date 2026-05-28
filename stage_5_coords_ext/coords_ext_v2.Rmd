@@ -140,7 +140,7 @@ process_and_save <- function(df, target_species, target_eco) {
   
   message(sprintf("Processing: %s [%s]", target_species, target_eco))
   
-  # A. Tidyverse Metadata Filters
+  # A. Tidyverse Metadata Filters (NOW WITH EDGE-OF-WORLD FIX)
   occ_filtered <- df %>%
     mutate(species = target_species) %>%
     mutate(coordinateUncertaintyInMeters = suppressWarnings(as.numeric(coordinateUncertaintyInMeters))) %>%
@@ -152,36 +152,39 @@ process_and_save <- function(df, target_species, target_eco) {
     filter(
       str_to_upper(occurrenceStatus) == "PRESENT",
       str_to_upper(basisOfRecord) != "FOSSIL_SPECIMEN",
-      is.na(coordinateUncertaintyInMeters) | coordinateUncertaintyInMeters <= 50000
+      is.na(coordinateUncertaintyInMeters) | coordinateUncertaintyInMeters <= 50000,
+      
+      # Drop the hardware telemetry glitches
+      abs(decimalLongitude) < 179.99,
+      abs(decimalLatitude) < 89.99
     ) %>%
     distinct(decimalLongitude, decimalLatitude, .keep_all = TRUE)
   
   if(nrow(occ_filtered) == 0) return(invisible(FALSE))
   
-  # B. CoordinateCleaner 
+  # B. CoordinateCleaner (NOW WITH OUTLIER DETECTION)
   occ_clean <- clean_coordinates(
     x = occ_filtered,
     lon = "decimalLongitude", lat = "decimalLatitude",
-    tests = c("zeros", "capitals", "centroids", "institutions"), 
+    tests = c("zeros", "capitals", "centroids", "institutions", "outliers"), 
     value = "clean", verbose = FALSE
   )
   
+  # Memory hack: dump the pre-cleaned data
   rm(occ_filtered)
   gc()
   
   if(nrow(occ_clean) == 0) return(invisible(FALSE))
   
-  # C. Strict sf Land/Sea Masking (THE FIX: Bulletproof Global Intersect)
+  # C. Strict sf Land/Sea Masking (WITH BULLETPROOF GLOBAL INTERSECT)
   occ_sf <- st_as_sf(occ_clean, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326, remove = FALSE)
   
   sf_use_s2(FALSE)
   
-  # We removed st_crop. We just ask the heavy global polygon directly.
-  # Wrapped in a tryCatch to automatically handle any rogue geometry errors.
+  # Wrapped in tryCatch to prevent GEOS topology crashes
   on_land <- tryCatch({
     lengths(st_intersects(occ_sf, land_sf)) > 0
   }, error = function(e) {
-    # If flat math fails, turn spherical math (S2) back on for a safe fallback!
     sf_use_s2(TRUE)
     lengths(st_intersects(occ_sf, sf::st_make_valid(land_sf))) > 0
   })
@@ -194,12 +197,13 @@ process_and_save <- function(df, target_species, target_eco) {
     occ_clean <- occ_clean[on_land, ]
   }
   
+  # Memory hack: dump the heavy spatial objects
   rm(occ_sf, on_land)
   gc()
   
   if(nrow(occ_clean) == 0) return(invisible(FALSE))
   
-  # D. Spatial Thinning 
+  # D. Spatial Thinning (OPTIMIZED GRID METHOD)
   occ_thinned <- tryCatch({
     thinned_obj <- GeoThinneR::thin_points(
       data = occ_clean,
@@ -273,7 +277,93 @@ future_walk(species_lookup$speciesKey, function(current_key) {
 cat("Parallel Processing complete.\n")
 ```
 
-# 6. Gather and Bind Cleaned Occurrences
+#6. Quality check
+```{r}
+library(patchwork)
+# 1. Look into the output directory to find all successfully processed species
+cleaned_dir <- "./stage_5_coords_ext/sp_occ_cleaned"
+processed_files <- fs::dir_ls(cleaned_dir, glob = "*.rds")
+
+if(length(processed_files) > 0) {
+  
+  # 2. Draw a random species from the completed list
+  random_file <- sample(processed_files, 1)
+  safe_name <- fs::path_ext_remove(fs::path_file(random_file))
+  target_species_name <- str_replace_all(safe_name, "_", " ")
+  
+  message(sprintf("Drawing map for random species: %s", target_species_name))
+  
+  # 3. Retrieve the corresponding GBIF key from your lookup table
+  target_key <- species_lookup %>%
+    filter(species_harmonized == target_species_name) %>%
+    pull(speciesKey) %>%
+    .[1]
+  
+  # 4. Load the highly curated Cleaned Data
+  clean_df <- read_rds(random_file)
+  
+  # 5. Load the noisy Raw Data directly from the Parquet database
+  fast_parquet <- open_dataset("./stage_5_coords_ext/fast_parquet", format = "parquet")
+  raw_df <- fast_parquet %>%
+    filter(speciesKey == target_key) %>%
+    collect()
+  
+  # 6. Define the strict Bounding Box based entirely on the RAW data
+  # (Adding a 2-degree visual buffer, constrained to global limits so sf doesn't crash)
+  xmin <- max(min(raw_df$decimalLongitude, na.rm = TRUE) - 2, -180)
+  xmax <- min(max(raw_df$decimalLongitude, na.rm = TRUE) + 2, 180)
+  ymin <- max(min(raw_df$decimalLatitude, na.rm = TRUE) - 2, -90)
+  ymax <- min(max(raw_df$decimalLatitude, na.rm = TRUE) + 2, 90)
+  
+  # Fetch a quick, clean basemap 
+  world <- ne_countries(scale = "medium", returnclass = "sf")
+  
+  # --- PANEL A: The Raw Occurrences ---
+  p_raw <- ggplot() +
+    geom_sf(data = world, fill = "gray90", color = "white") +
+    ggrastr::rasterise(geom_point(data = raw_df, aes(x = decimalLongitude, y = decimalLatitude), 
+               color = "darkred", size = 1.2, alpha = 0.5),dpi=300) +
+    coord_sf(xlim = c(xmin, xmax), ylim = c(ymin, ymax), expand = FALSE) +
+    theme_minimal() +
+    labs(
+      title = paste("A. Raw Occurrences"),
+      subtitle = paste("n =", nrow(raw_df)),
+      x = "Longitude", y = "Latitude"
+    )
+  
+  # --- PANEL B: The Cleaned & Thinned Occurrences ---
+  p_clean <- ggplot() +
+    geom_sf(data = world, fill = "gray90", color = "white") +
+    ggrastr::rasterise(geom_point(data = clean_df, aes(x = decimalLongitude, y = decimalLatitude), 
+               color = "dodgerblue", size = 1.2, alpha = 0.5),dpi=300) +
+    coord_sf(xlim = c(xmin, xmax), ylim = c(ymin, ymax), expand = FALSE) +
+    theme_minimal() +
+    labs(
+      title = paste("B. Cleaned Occurrences"),
+      subtitle = paste("n =", nrow(clean_df)),
+      x = "Longitude", y = "Latitude"
+    )
+  
+  # 7. Stitch them together and apply a master title
+  combined_plot <- p_raw + p_clean + 
+    plot_annotation(
+      title = target_species_name,
+      theme = theme(plot.title = element_text(size = 18, face = "bold", hjust = 0.5))
+    )
+  
+  # 8. Save the final image to the drive
+  output_img <- path("./stage_5_coords_ext/qc", paste0(safe_name, ".png"))
+  ggsave(output_img, plot = combined_plot, width = 14, height = 6, dpi = 300, bg = "white")
+  
+  cat("Success! Map saved to:", output_img, "\n")
+  
+} else {
+  cat("No cleaned .rds files exist yet. Run the processing loop first!\n")
+}
+```
+
+
+# 7. Gather and Bind Cleaned Occurrences
 ```{r}
 library(purrr)
 
