@@ -1,0 +1,298 @@
+---
+title: "Limit-Free GBIF Processing Pipeline"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## 1. Setup & Credentials
+
+```{r load-libraries-and-credentials}
+library(rgbif)
+library(CoordinateCleaner)
+library(tidyverse)
+library(fs)
+library(sf)
+library(rnaturalearth)
+library(GeoThinneR) 
+library(arrow) #  For out-of-core processing of massive datasets
+
+# --- ENTER YOUR GBIF CREDENTIALS HERE ---
+# GBIF requires credentials for unlimited downloads.
+Sys.setenv(
+  GBIF_USER = "shahar_chaikin",
+  GBIF_PWD  = "o08*ZE!7m1Cp",
+  GBIF_EMAIL = "shahar710@gmail.com"
+)
+```
+
+2. Prepare Species List & Fetch Data
+Instead of relying on literal string matches which can fail in GBIF, we use the rgbif backbone matching tool to get the exact taxonKey for each of your ~730 species.
+
+```{r}
+# Load the target species list generated in Stage 4
+target_species <- read.csv("./stage_4_bind_biotime_bioshifts/target_species_for_occurrences.csv")
+```
+
+```{r}
+# 1. Extract and clean the existing GBIF keys
+taxa_keys <- target_species %>%
+  filter(!is.na(taxonID)) %>%
+  mutate(usageKey = as.numeric(str_remove(taxonID, "GBIF:"))) %>%
+  distinct(usageKey) %>%
+  pull(usageKey)
+
+cat("Successfully extracted", length(taxa_keys), "unique GBIF keys.\n")
+
+# 2. Request the massive bulk download
+gbif_download <- occ_download(
+  pred_in("taxonKey", taxa_keys),
+  pred("hasCoordinate", TRUE),
+  pred_gte("year", 1900), 
+  format = "SIMPLE_CSV"
+)
+
+# 3. Wait for the server to finish generating the file
+occ_download_wait(gbif_download)
+
+# 4. DOWNLOAD ONLY - DO NOT IMPORT
+# This saves the massive .zip file to your working directory.
+occ_download_get(gbif_download, path = "D:/Shahar_Chaikin_phd/sRED/occ_05_2026/gbif_raw_data")
+
+cat("Download complete! STOP HERE. Go to the './gbif_raw_data' folder on your computer and manually unzip the file before proceeding to Step 3.\n")
+```
+
+3. Arrow Partitioning (The 168GB Rescue)
+Once we have manually unzipped the file (which will yield a massive .csv), we use arrow to scan it on the hard drive and slice it into hundreds of tiny files, grouped by species.
+```{r}
+# 3. Arrow Partitioning (The 168GB Rescue)
+library(purrr)
+
+raw_csv_path <- "D:/Shahar_Chaikin_phd/sRED/occ_05_2026/gbif_raw_data/0002281-260519110011954.csv"
+
+# 1. Instantly extract the column headers
+header <- strsplit(readLines(raw_csv_path, n = 1), "\t")[[1]]
+header <- gsub('^"|"$', '', header) 
+
+# 2. Build the Bulletproof Schema (Everything is a string)
+string_types <- map(setNames(header, header), ~utf8())
+bulletproof_schema <- do.call(schema, string_types)
+
+# 3. Open the dataset (Using ONLY native Arrow options)
+massive_csv <- open_dataset(
+  raw_csv_path, 
+  format = "csv", 
+  delimiter = "\t",
+  schema = bulletproof_schema,
+  skip_rows = 1,
+  null_values = c("", "NA", "null", " "),
+  quoting = FALSE, 
+  newlines_in_values = TRUE 
+)
+
+massive_csv %>%
+  select(
+    speciesKey, 
+    decimalLongitude, 
+    decimalLatitude, 
+    occurrenceStatus, 
+    basisOfRecord, 
+    coordinateUncertaintyInMeters
+  ) %>%
+  filter(
+    !is.na(decimalLongitude) & decimalLongitude != "",
+    !is.na(decimalLatitude) & decimalLatitude != "",
+    !is.na(speciesKey) & speciesKey != ""
+  ) %>%
+  mutate(
+    speciesKey = as.integer(speciesKey),
+    decimalLongitude = as.numeric(decimalLongitude),
+    decimalLatitude = as.numeric(decimalLatitude)
+  ) %>%
+  
+  # THE FIX: We completely removed group_by(speciesKey)!
+  # Arrow will now write sequentially at maximum hard drive speed.
+  write_dataset(path = "D:/Shahar_Chaikin_phd/sRED/occ_05_2026/gbif_flat_parquet", format = "parquet")
+
+cat("Linear Parquet database created!\n")
+```
+
+4. Define the Spatial Mask & Processing Function
+Here we load a high-quality global land shapefile and define the processing function that will filter, mask, thin, and save each species to its own .rds file.
+
+```{r}
+# Load a global physical land polygon for masking
+land_sf <- ne_download(scale = 50, type = "land", category = "physical", returnclass = "sf") %>%
+  st_make_valid() %>%
+  st_union()
+
+process_and_save <- function(df, target_species, target_eco) {
+  
+  output_dir <- "./stage_5_coords_ext/sp_occ_cleaned"
+  dir_create(output_dir)
+  
+  safe_name <- str_replace_all(target_species, " ", "_")
+  output_file <- path(output_dir, paste0(safe_name, ".rds"))
+  
+  message(sprintf("Processing: %s [%s]", target_species, target_eco))
+  
+  # A. Tidyverse Metadata Filters
+  occ_filtered <- df %>%
+    mutate(species = target_species) %>%
+    mutate(coordinateUncertaintyInMeters = suppressWarnings(as.numeric(coordinateUncertaintyInMeters))) %>%
+    mutate(
+      occurrenceStatus = if(!"occurrenceStatus" %in% names(.)) "PRESENT" else occurrenceStatus,
+      coordinateUncertaintyInMeters = if(!"coordinateUncertaintyInMeters" %in% names(.)) NA else coordinateUncertaintyInMeters,
+      basisOfRecord = if(!"basisOfRecord" %in% names(.)) "UNKNOWN" else basisOfRecord
+    ) %>%
+    filter(
+      str_to_upper(occurrenceStatus) == "PRESENT",
+      str_to_upper(basisOfRecord) != "FOSSIL_SPECIMEN",
+      is.na(coordinateUncertaintyInMeters) | coordinateUncertaintyInMeters <= 50000
+    ) %>%
+    distinct(decimalLongitude, decimalLatitude, .keep_all = TRUE)
+  
+  if(nrow(occ_filtered) == 0) return(invisible(FALSE))
+  
+  # B. CoordinateCleaner 
+  occ_clean <- clean_coordinates(
+    x = occ_filtered,
+    lon = "decimalLongitude", lat = "decimalLatitude",
+    tests = c("zeros", "capitals", "centroids", "institutions"), 
+    value = "clean", verbose = FALSE
+  )
+  
+  rm(occ_filtered)
+  gc()
+  
+  if(nrow(occ_clean) == 0) return(invisible(FALSE))
+  
+  # C. Strict sf Land/Sea Masking (THE FIX: Bulletproof Global Intersect)
+  occ_sf <- st_as_sf(occ_clean, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326, remove = FALSE)
+  
+  sf_use_s2(FALSE)
+  
+  # We removed st_crop. We just ask the heavy global polygon directly.
+  # Wrapped in a tryCatch to automatically handle any rogue geometry errors.
+  on_land <- tryCatch({
+    lengths(st_intersects(occ_sf, land_sf)) > 0
+  }, error = function(e) {
+    # If flat math fails, turn spherical math (S2) back on for a safe fallback!
+    sf_use_s2(TRUE)
+    lengths(st_intersects(occ_sf, sf::st_make_valid(land_sf))) > 0
+  })
+  
+  sf_use_s2(TRUE)
+  
+  if (target_eco == "Mar") {
+    occ_clean <- occ_clean[!on_land, ]
+  } else if (target_eco %in% c("Ter", "Fre")) {
+    occ_clean <- occ_clean[on_land, ]
+  }
+  
+  rm(occ_sf, on_land)
+  gc()
+  
+  if(nrow(occ_clean) == 0) return(invisible(FALSE))
+  
+  # D. Spatial Thinning 
+  occ_thinned <- tryCatch({
+    thinned_obj <- GeoThinneR::thin_points(
+      data = occ_clean,
+      lon_col = "decimalLongitude", lat_col = "decimalLatitude",
+      method = "grid", 
+      resolution = 0.1, 
+      trials = 1
+    )
+    occ_clean[thinned_obj$retained[[1]], ]
+  }, error = function(e) {
+    message(sprintf("  -> Thinning Error: %s", e$message))
+    return(NULL)
+  })
+  
+  if (is.null(occ_thinned) || nrow(occ_thinned) == 0) return(invisible(FALSE))
+  
+  # E. Save to file 
+  write_rds(occ_thinned, output_file)
+  message(sprintf("  -> SUCCESS: Saved %s clean records.", nrow(occ_thinned)))
+  
+  return(invisible(TRUE))
+}
+```
+
+5. Execute Pipeline on Parquet Partitions
+Finally, we loop through the tiny Parquet folders created by arrow, pull the correct species metadata from your target_species list, and clean the data one by one.
+```{r}
+library(furrr)
+library(arrow)
+
+species_lookup <- target_species %>%
+  filter(!is.na(taxonID)) %>%
+  mutate(speciesKey = as.integer(str_remove(taxonID, "GBIF:"))) %>%
+  select(speciesKey, species_harmonized, Eco)
+
+# THE FIX: Hardcode this to exactly 2 workers to maximize RAM per core
+plan(multisession, workers = 2)
+
+future_walk(species_lookup$speciesKey, function(current_key) {
+  
+  fast_parquet <- arrow::open_dataset("./stage_5_coords_ext/fast_parquet", format = "parquet")
+  
+  meta <- species_lookup %>% filter(speciesKey == current_key)
+  
+  if(nrow(meta) > 0) {
+    target_species_name <- meta$species_harmonized[1]
+    safe_name <- str_replace_all(target_species_name, " ", "_")
+    expected_output <- path("./stage_5_coords_ext/sp_occ_cleaned", paste0(safe_name, ".rds"))
+    
+    if (file_exists(expected_output)) {
+      return() 
+    }
+    
+    current_df <- fast_parquet %>%
+      filter(speciesKey == current_key) %>%
+      collect()
+    
+    if(nrow(current_df) > 0) {
+      process_and_save(current_df, target_species_name, meta$Eco[1])
+    }
+    
+    # Final worker trash-empty
+    gc()
+  }
+  
+}, .options = furrr_options(
+  seed = TRUE, 
+  packages = c("dplyr", "sf", "CoordinateCleaner", "stringr", "fs", "readr")
+), .progress = TRUE)
+
+cat("Parallel Processing complete.\n")
+```
+
+# 6. Gather and Bind Cleaned Occurrences
+```{r}
+library(purrr)
+
+# 1. Point to the directory where process_and_save() dropped the files
+cleaned_dir <- "./stage_5_coords_ext/sp_occ_cleaned"
+
+# 2. Get a list of all the individual .rds files
+cleaned_files <- dir_ls(cleaned_dir, glob = "*.rds")
+
+# 3. Read all files and bind them into a single massive dataframe
+# map_dfr is extremely fast and automatically stacks the rows
+master_occ_data <- cleaned_files %>%
+  map_dfr(read_rds)
+
+# 4. Save the master dataset for the Thermal Position script
+# Saving as .rds is highly recommended over .csv because it preserves spatial/numeric column types
+write_rds(master_occ_data, "./stage_5_coords_ext/master_cleaned_occurrences.rds")
+
+cat("Successfully gathered", nrow(master_occ_data), "total occurrences across", 
+    n_distinct(master_occ_data$species), "species.\n")
+```
+
