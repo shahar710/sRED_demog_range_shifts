@@ -140,7 +140,7 @@ process_and_save <- function(df, target_species, target_eco) {
   
   message(sprintf("Processing: %s [%s]", target_species, target_eco))
   
-  # A. Tidyverse Metadata Filters (NOW WITH EDGE-OF-WORLD FIX)
+  # A. Tidyverse Metadata Filters (Edge-of-World Fix)
   occ_filtered <- df %>%
     mutate(species = target_species) %>%
     mutate(coordinateUncertaintyInMeters = suppressWarnings(as.numeric(coordinateUncertaintyInMeters))) %>%
@@ -155,18 +155,18 @@ process_and_save <- function(df, target_species, target_eco) {
       is.na(coordinateUncertaintyInMeters) | coordinateUncertaintyInMeters <= 50000,
       
       # Drop the hardware telemetry glitches
-      abs(decimalLongitude) < 179.99,
-      abs(decimalLatitude) < 89.99
+      abs(decimalLongitude) < 179.5,
+      abs(decimalLatitude) < 89.5
     ) %>%
     distinct(decimalLongitude, decimalLatitude, .keep_all = TRUE)
   
   if(nrow(occ_filtered) == 0) return(invisible(FALSE))
   
-  # B. CoordinateCleaner (NOW WITH OUTLIER DETECTION)
+  # B. CoordinateCleaner (Artifacts Only, Outliers removed from this step)
   occ_clean <- clean_coordinates(
     x = occ_filtered,
     lon = "decimalLongitude", lat = "decimalLatitude",
-    tests = c("zeros", "capitals", "centroids", "institutions", "outliers"), 
+    tests = c("zeros", "capitals", "centroids", "institutions", "equal", "gbif"), 
     value = "clean", verbose = FALSE
   )
   
@@ -176,12 +176,11 @@ process_and_save <- function(df, target_species, target_eco) {
   
   if(nrow(occ_clean) == 0) return(invisible(FALSE))
   
-  # C. Strict sf Land/Sea Masking (WITH BULLETPROOF GLOBAL INTERSECT)
+  # C. Strict sf Land/Sea Masking
   occ_sf <- st_as_sf(occ_clean, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326, remove = FALSE)
   
   sf_use_s2(FALSE)
   
-  # Wrapped in tryCatch to prevent GEOS topology crashes
   on_land <- tryCatch({
     lengths(st_intersects(occ_sf, land_sf)) > 0
   }, error = function(e) {
@@ -220,7 +219,25 @@ process_and_save <- function(df, target_species, target_eco) {
   
   if (is.null(occ_thinned) || nrow(occ_thinned) == 0) return(invisible(FALSE))
   
-  # E. Save to file 
+  # E. Custom MAD Outlier Detection (The True Fix)
+  center_lon <- median(occ_thinned$decimalLongitude, na.rm = TRUE)
+  center_lat <- median(occ_thinned$decimalLatitude, na.rm = TRUE)
+  center_pt <- st_sfc(st_point(c(center_lon, center_lat)), crs = 4326)
+  
+  pts_sf <- st_as_sf(occ_thinned, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326)
+  dists <- as.numeric(st_distance(pts_sf, center_pt))
+  
+  med_dist <- median(dists, na.rm = TRUE)
+  mad_dist <- mad(dists, na.rm = TRUE)
+  
+  # Multiplier 5.0 with a 500km floor to protect both basin-wide and endemic species
+  cutoff_dist <- med_dist + max(5.0 * mad_dist, 500000) 
+  
+  occ_thinned <- occ_thinned[dists <= cutoff_dist, ]
+  
+  if(nrow(occ_thinned) == 0) return(invisible(FALSE))
+  
+  # F. Save to file 
   write_rds(occ_thinned, output_file)
   message(sprintf("  -> SUCCESS: Saved %s clean records.", nrow(occ_thinned)))
   
