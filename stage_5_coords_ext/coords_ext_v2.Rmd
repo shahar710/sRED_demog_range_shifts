@@ -292,6 +292,9 @@ future_walk(species_lookup$speciesKey, function(current_key) {
 ), .progress = TRUE)
 
 cat("Parallel Processing complete.\n")
+
+#Kill workers
+#plan(sequential)
 ```
 
 #6. Quality check
