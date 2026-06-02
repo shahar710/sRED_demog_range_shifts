@@ -1,6 +1,6 @@
 ---
 title: "Limit-Free GBIF Processing Pipeline"
-author: "Your Name"
+author: "Shahar Chaikin"
 date: "`r Sys.Date()`"
 output: html_document
 ---
@@ -21,7 +21,7 @@ library(rnaturalearth)
 library(GeoThinneR) 
 library(arrow) #  For out-of-core processing of massive datasets
 
-# --- ENTER YOUR GBIF CREDENTIALS HERE ---
+# --- ENTER GBIF CREDENTIALS HERE ---
 # GBIF requires credentials for unlimited downloads.
 Sys.setenv(
   GBIF_USER = "shahar_chaikin",
@@ -31,7 +31,7 @@ Sys.setenv(
 ```
 
 2. Prepare Species List & Fetch Data
-Instead of relying on literal string matches which can fail in GBIF, we use the rgbif backbone matching tool to get the exact taxonKey for each of your ~730 species.
+Instead of relying on literal string matches which can fail in GBIF, we use the rgbif backbone matching tool to get the exact taxonKey for each of  ~750 species.
 
 ```{r}
 # Load the target species list generated in Stage 4
@@ -60,10 +60,10 @@ gbif_download <- occ_download(
 occ_download_wait(gbif_download)
 
 # 4. DOWNLOAD ONLY - DO NOT IMPORT
-# This saves the massive .zip file to your working directory.
+# This saves the massive .zip file to working directory.
 occ_download_get(gbif_download, path = "D:/Shahar_Chaikin_phd/sRED/occ_05_2026/gbif_raw_data")
 
-cat("Download complete! STOP HERE. Go to the './gbif_raw_data' folder on your computer and manually unzip the file before proceeding to Step 3.\n")
+cat("Download complete! STOP HERE. Go to the './gbif_raw_data' folder on  computer and manually unzip the file before proceeding to Step 3.\n")
 ```
 
 3. Arrow Partitioning (The 168GB Rescue)
@@ -114,7 +114,6 @@ massive_csv %>%
     decimalLatitude = as.numeric(decimalLatitude)
   ) %>%
   
-  # THE FIX: We completely removed group_by(speciesKey)!
   # Arrow will now write sequentially at maximum hard drive speed.
   write_dataset(path = "D:/Shahar_Chaikin_phd/sRED/occ_05_2026/gbif_flat_parquet", format = "parquet")
 
@@ -219,7 +218,7 @@ process_and_save <- function(df, target_species, target_eco) {
   
   if (is.null(occ_thinned) || nrow(occ_thinned) == 0) return(invisible(FALSE))
   
-  # E. Custom MAD Outlier Detection (The True Fix)
+  # E. Custom MAD Outlier Detection
   center_lon <- median(occ_thinned$decimalLongitude, na.rm = TRUE)
   center_lat <- median(occ_thinned$decimalLatitude, na.rm = TRUE)
   center_pt <- st_sfc(st_point(c(center_lon, center_lat)), crs = 4326)
@@ -246,7 +245,7 @@ process_and_save <- function(df, target_species, target_eco) {
 ```
 
 5. Execute Pipeline on Parquet Partitions
-Finally, we loop through the tiny Parquet folders created by arrow, pull the correct species metadata from your target_species list, and clean the data one by one.
+Finally, we loop through the tiny Parquet folders created by arrow, pull the correct species metadata from target_species list, and clean the data one by one.
 ```{r}
 library(furrr)
 library(arrow)
@@ -313,7 +312,7 @@ if(length(processed_files) > 0) {
   
   message(sprintf("Drawing map for random species: %s", target_species_name))
   
-  # 3. Retrieve the corresponding GBIF key from your lookup table
+  # 3. Retrieve the corresponding GBIF key from  lookup table
   target_key <- species_lookup %>%
     filter(species_harmonized == target_species_name) %>%
     pull(speciesKey) %>%
@@ -381,7 +380,6 @@ if(length(processed_files) > 0) {
   cat("No cleaned .rds files exist yet. Run the processing loop first!\n")
 }
 ```
-
 
 # 7. Gather and Bind Cleaned Occurrences
 ```{r}

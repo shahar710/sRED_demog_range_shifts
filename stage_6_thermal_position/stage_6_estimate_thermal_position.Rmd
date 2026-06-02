@@ -1,0 +1,239 @@
+---
+title: "Estimating Ecosystem-Aware Thermal Position"
+author: "Shahar Chaikin"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+Aim:
+This script estimates the "thermal position" of populations across Marine, Terrestrial, and Freshwater ecosystems by matching species occurrences and H3 hexagonal cells against the appropriate ecosystem-specific climate raster.
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(tidyverse)    
+library(raster)       # For legacy raster handling (though terra is recommended for the future)
+library(h3jsr)        
+library(sf)           
+library(DataExplorer)
+library(stars)
+library(geodata)
+library(terra)
+```
+
+1) Load spatial thinned occurrence data and Ecosystem Metadata
+We must join the Eco metadata so the script knows which raster to use for each species.
+```{r}
+# 1) Load spatial thinned occurrence data and Ecosystem Metadata
+
+# 1. Load the target species list and FORCE exactly one Ecosystem per species
+sp_metadata <- read.csv("./stage_4_bind_biotime_bioshifts/target_species_for_occurrences.csv") %>%
+  dplyr::select(species_harmonized, Eco) %>%
+  drop_na(Eco) %>% # Drop any rows without an ecosystem first
+  distinct(species_harmonized, .keep_all = TRUE) # THE FIX: Strictly 1 row per species
+
+# 2. Load the master cleaned occurrences just gathered
+master_occ <- read_rds("./stage_5_coords_ext/master_cleaned_occurrences.rds") %>%
+  # Join the ecosystem type so the script knows which raster to use
+  left_join(sp_metadata, by = c("species" = "species_harmonized")) %>%
+  drop_na(Eco) # Ensure every record has an ecosystem assigned
+
+# Quick sanity check: This should now return 0!
+cat("Duplicated species in lookup table:", sum(duplicated(sp_metadata$species_harmonized)), "\n")
+```
+
+2) Load Dual Climate Rasters
+
+Marine
+```{r}
+# ==========================================
+# A. MARINE RASTER (GLORYS 1993–2016 SST)
+# ==========================================
+nc_filepath <- "./stage_6_thermal_position/cmems_mod_glo_phy_my_0.083deg-climatology_P1M-m_1780305040080.nc" 
+
+cat("Loading marine file directly from disk...\n")
+clim_data <- read_stars(nc_filepath)
+
+# Collapse the dimensions (averaging across months and depth)
+cat("Averaging across months and depth...\n")
+annual_mean_stars <- st_apply(clim_data, c("x", "y"), mean, na.rm = TRUE)
+
+# Convert to legacy Raster
+mar_raster <- as(annual_mean_stars, "Raster")
+raster::crs(mar_raster) <- "EPSG:4326"
+
+# THE FIX: Explicitly name the marine layer so extraction is predictable
+names(mar_raster) <- "mar_temp"
+
+cat("SST Raster successfully prepared!\n")
+```
+
+Terrestrial
+```{r}
+# ==========================================
+# B. TERRESTRIAL RASTER (WorldClim Annual Mean Temp)
+# ==========================================
+cat("Fetching WorldClim Terrestrial Raster...\n")
+
+wc_data <- worldclim_global(var = "bio", res = 5, path = "./stage_6_thermal_position")
+
+ter_raster_spat <- wc_data[["wc2.1_5m_bio_1"]]
+ter_raster <- raster::raster(ter_raster_spat)
+
+# THE FIX: Explicitly name the terrestrial layer
+names(ter_raster) <- "ter_temp"
+
+cat("Terrestrial Raster successfully prepared!\n")
+```
+
+View
+```{r}
+# Define a smooth temperature color palette (cool = blue, warm = red)
+temp_pal <- colorRampPalette(c("darkblue", "dodgerblue", "cyan", "yellow", "red", "darkred"))(100)
+
+# Quick plot check to ensure both loaded correctly
+par(mfrow=c(1,2))
+
+# Apply the custom palette using the 'col' argument
+plot(mar_raster, main = "GLORYS Annual SST", col = temp_pal)
+plot(ter_raster, main = "WorldClim Annual Temp", col = temp_pal)
+
+par(mfrow=c(1,1))
+```
+
+3) Overlap Occurrence Records with Correct Ecosystem Rasters
+```{r}
+# A. Marine Extraction
+mar_data <- master_occ %>% filter(Eco == "Mar")
+mar_coords <- mar_data %>% dplyr::select(decimalLongitude, decimalLatitude)
+mar_data$extracted_temp <- raster::extract(mar_raster, mar_coords)
+
+# B. Terrestrial & Freshwater Extraction
+ter_data <- master_occ %>% filter(Eco %in% c("Ter", "Fre"))
+ter_coords <- ter_data %>% dplyr::select(decimalLongitude, decimalLatitude)
+ter_data$extracted_temp <- raster::extract(ter_raster, ter_coords)
+
+# C. Recombine and clean
+sp_occ_combined <- bind_rows(mar_data, ter_data) %>%
+  drop_na(extracted_temp) # Drops points that fell completely outside raster boundaries
+```
+
+4) Create Per-Species Thermal Summary
+```{r}
+sp_temp_data <- sp_occ_combined %>% 
+  group_by(species, Eco) %>% 
+  summarise(
+    n_occ = n(),
+    min_temp = min(extracted_temp),
+    mean_temp = mean(extracted_temp),
+    median_temp = median(extracted_temp),
+    max_temp = max(extracted_temp),
+    mid_point = (max_temp + min_temp) / 2,
+    thermal_range = max_temp - min_temp,
+    .groups = "drop"
+  ) %>% 
+  mutate(across(where(is.numeric), round, digits = 3))
+```
+
+5) Estimate Temperatures within each H3 Hexagon
+We calculate both marine and terrestrial temperatures for every H3 cell, as coastal cells may host both types of species.
+```{r}
+# Load the unique H3 IDs from harmonized dataset
+final_dataset <- read_rds("./stage_4_bind_biotime_bioshifts/final_dataset_lite.rds")
+used_h3 <- final_dataset %>% 
+  distinct(h3_id) %>%
+  mutate(h3_polygon = h3jsr::cell_to_polygon(h3_id))
+
+polygons_sf <- sf::st_as_sf(used_h3$h3_polygon, wkt = used_h3$h3_id) 
+
+# Extract from BOTH rasters (These will now output columns named 'mar_temp' and 'ter_temp')
+mar_poly_vals <- raster::extract(mar_raster, polygons_sf, df = TRUE)
+ter_poly_vals <- raster::extract(ter_raster, polygons_sf, df = TRUE)
+
+# Summarize Marine H3
+mar_h3_summary <- mar_poly_vals %>%
+  group_by(ID) %>% 
+  summarize(h3_median_mar_temp = round(median(mar_temp, na.rm = TRUE), 3))
+
+# Summarize Terrestrial H3 
+ter_h3_summary <- ter_poly_vals %>%
+  group_by(ID) %>% 
+  summarize(h3_median_ter_temp = round(median(ter_temp, na.rm = TRUE), 3))
+
+# Bind back to H3 IDs
+h3_temp_summary <- used_h3 %>%
+  mutate(ID = row_number()) %>%
+  left_join(mar_h3_summary, by = "ID") %>%
+  left_join(ter_h3_summary, by = "ID") %>%
+  dplyr::select(h3_id, h3_median_mar_temp, h3_median_ter_temp)
+```
+
+6) Calculate Ecosystem-Aware Thermal Position Index
+```{r}
+# Extract the unique populations from newly built final dataset
+pop_info <- final_dataset %>%
+  distinct(unique_pop_id, species = species_harmonized, h3_id, Eco)
+
+# Calculate thermal position dynamically
+thermal_pos <- pop_info %>%
+  left_join(sp_temp_data, by = c("species", "Eco")) %>% 
+  left_join(h3_temp_summary, by = "h3_id") %>% 
+  filter(n_occ > 1) %>% 
+  group_by(unique_pop_id) %>% 
+  mutate(
+    # dynamically select the correct H3 temperature based on the species' ecosystem
+    h3_median_active_temp = ifelse(Eco == "Mar", h3_median_mar_temp, h3_median_ter_temp),
+    
+    # Calculate the unified thermal position index
+    thermal_pos_index = ((h3_median_active_temp - median_temp) / (max_temp - mid_point)) %>% 
+                        round(digits = 3)
+  ) %>% 
+  drop_na(n_occ, thermal_pos_index) %>%
+  # Clean up the intermediate calculation columns
+  dplyr::select(-h3_median_mar_temp, -h3_median_ter_temp, -h3_median_active_temp)
+
+# Check the spread of the new index
+summary(thermal_pos$thermal_pos_index)
+
+# Save the final indices
+write_rds(thermal_pos, "./stage_6_thermal_position/thermal_pos_all_ecos.rds")
+
+cat("Calculated thermal positions for", n_distinct(thermal_pos$species), "species.\n")
+
+# Visualize missingness
+DataExplorer::plot_missing(thermal_pos)
+```
+
+7) Diagnostic Visualizations of Thermal Position
+```{r, fig.width=10, fig.height=8}
+library(patchwork)
+
+# 1. Recode the Ecosystem abbreviations into full words for the plot
+plot_data <- thermal_pos %>%
+  mutate(Eco = recode(Eco, 
+                      "Mar" = "Marine", 
+                      "Ter" = "Terrestrial"))
+# 2. Define distinct colors using the NEW full names
+eco_colors <- c("Marine" = "dodgerblue", 
+                "Terrestrial" = "forestgreen")
+
+# --- PANEL A: Density Distribution ---
+# Shows the overall shape and skewness of populations relative to their thermal limits
+p_density <- ggplot(plot_data, aes(x = thermal_pos_index, fill = Eco)) +
+  # Add reference lines for the Cold Edge (-1), Midpoint (0), and Warm Edge (1)
+  geom_vline(xintercept = c(-1, 0, 1), linetype = "dashed", color = "gray50", size = 0.5) +
+  geom_density(alpha = 0.6, color = "white", size = 0.5) +
+  scale_fill_manual(values = eco_colors) +
+  theme_bw(base_size = 14) +
+  labs(
+    title = "Density distribution of thermal position",
+    caption = "Dashed lines represent cold edge (-1), and warm edge (+1)",
+    x = "Thermal position",
+    y = "Density",
+    fill = "Ecosystem"
+  ) +
+  theme(legend.position = "top")
+# Save to disk for records
+ggsave("./stage_6_thermal_position/t_pos_eco.png", 
+       plot = p_density, width = 12, height = 8, dpi = 300, bg = "white")
+
+cat("Diagnostic plot saved to ./stage_6_thermal_position/diagnostic_thermal_position.png\n")
+```
