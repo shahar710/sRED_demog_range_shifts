@@ -1,0 +1,349 @@
+---
+title: "stage_5_models"
+author: "Shahar Chaikin"
+date: "2026-05-19"
+output: html_document
+---
+```{r setup, include=FALSE}
+# Set global chunk options
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 8, fig.height = 6)
+```
+
+## 1. Environment Setup
+
+Load the necessary statistical and data manipulation packages.
+
+```{r libraries}
+# Data manipulation and visualization
+library(tidyverse)
+
+# Advanced mixed modeling
+library(glmmTMB)
+
+# Diagnostics and performance
+library(DHARMa)       # Gold standard for mixed model residuals
+library(performance)  # Comprehensive model checks
+
+# Tidy coefficient extraction and R-squared
+library(broom.mixed)  # Tidyverse support for glmmTMB
+library(MuMIn)        # Pseudo R-squared for mixed models
+library(ggeffects)
+```
+
+## 2. Data Loading and Preparation
+
+Here, we load the harmonized dataset and isolate the latitudinal shifts. We also scale our continuous predictors (`YEAR` and `Rate`) to help the model converge faster and make the interaction coefficients directly comparable.
+
+```{r data_prep}
+# 1. Load the Thermal Position Index
+thermal_data <- read_rds("./stage_6_thermal_position/thermal_pos_all_ecos.rds") %>%
+  dplyr::select(unique_pop_id, thermal_pos_index)
+
+# 2. Prepare and properly format the dataset for the model
+dataset_for_model <- read_rds("./stage_4_bind_biotime_bioshifts/master_population_slopes.rds") %>%
+  # STRICT FILTER: Ensure we are only comparing Latitudinal shifts
+  filter(toupper(Type) == "LAT") %>%
+  
+  # THE FIX: Join the thermal position index
+  left_join(thermal_data, by = "unique_pop_id") %>%
+  drop_na(thermal_pos_index) %>% # Essential: Drop NAs before feeding to the model
+  
+  # Format factors for clean modeling and plotting
+  mutate(
+    # Set Terrestrial as the baseline for the interaction contrast
+    Eco = factor(Eco, levels = c("Ter", "Mar")),
+    
+    # Cast grouping variables as factors so they behave correctly as random intercepts
+    species_harmonized = as.factor(species_harmonized),
+    h3_id = as.factor(h3_id),
+    model_type = as.factor(model_type),
+    class = as.factor(class),
+    ID_BioShifts = as.factor(ID_BioShifts),
+   
+    # Find the 99th percentile of the weights
+    weight_99th = quantile(inv_var_weight, 0.99, na.rm = TRUE),
+    
+    # Cap any weight above that threshold strictly at the 99th percentile
+    weight_capped = pmin(inv_var_weight, weight_99th),
+    weight_years = log(total_sampled_years)
+  ) %>% 
+  ungroup()
+
+
+```
+
+## 3.Modeling
+
+###3.1 run glmm
+The effect of range shift velocities over time and realms on abundance
+
+```{r}
+final_eco_model <- glmmTMB(
+  
+  slope ~ scale(Rate) * Eco * scale(thermal_pos_index) + 
+    
+    (1 | species_harmonized) + 
+    (1 | h3_id) + 
+    (1 | ID_BioShifts),
+  
+  data = dataset_for_model,
+  weights = weight_years, 
+  family = t_family(),
+  
+  # THE FIX: Properly formatted control arguments to give the optimizer 10x more steps
+  control = glmmTMBControl(
+    optCtrl = list(iter.max = 10000, eval.max = 10000)
+  )
+)
+#diagnostics
+check_convergence(final_eco_model)
+check_collinearity(final_eco_model)
+check_singularity(final_eco_model)
+sim_res <- simulateResiduals(fittedModel = final_eco_model, plot = TRUE,n = 70)
+
+
+saveRDS(final_eco_model,"./stage_7_models/final_eco_model_t_pos.rds")
+summary(final_eco_model)
+final_eco_model_rsq = r.squaredGLMM(final_eco_model)
+final_eco_model_rsq
+
+
+# 1. Extract the Pearson residuals
+diag_data <- data.frame(
+  resid = residuals(final_eco_model, type = "pearson")
+) %>% na.omit()
+
+# 2. Open the PNG pipeline
+png("./stage_7_models/QQ_Plot_Student_t_Zoomed.png", width = 6, height = 6, units = "in", res = 300)
+
+# 3. Generate theoretical quantiles 
+theoretical_t <- qt(ppoints(length(diag_data$resid)), df = 1.7)
+
+# 4. Draw the zoomed Q-Q plot
+qqplot(theoretical_t, diag_data$resid, 
+       pch = 16, 
+       col = rgb(0, 0, 0, alpha = 0.1), 
+       main = "Zoomed Student-t Q-Q Plot",
+       xlab = "Theoretical Quantiles (Student-t, df = 1.7)",
+       ylab = "Sample Quantiles (Weighted Pearson Residuals)",
+       
+       # THE FIX: Zoom the camera in to the central data cloud!
+       xlim = c(-15, 15), 
+       ylim = c(-350, 350)) 
+
+# 5. Add the reference line
+probs <- c(0.25, 0.75)
+y_coords <- quantile(diag_data$resid, probs, names = FALSE, na.rm = TRUE)
+x_coords <- qt(probs, df = 1.7)
+slope <- diff(y_coords) / diff(x_coords)
+int <- y_coords[1] - slope * x_coords[1]
+abline(int, slope, col = "red", lwd = 2, lty = 2)
+
+# 6. Close the pipeline
+dev.off()
+
+cat("Zoomed QQ Plot saved!\n")
+
+sjPlot::plot_model(final_eco_model,type="pred",terms=c("Rate","thermal_pos_index[-1,1]","Eco"))
+```
+
+###3.2 summary table
+```{r}
+# Extract the fixed effects cleanly using broom.mixed
+model_coefficients <- tidy(final_eco_model, effects = "fixed", conf.int = TRUE) %>%
+  # Round numeric columns for clean reading
+  mutate(across(where(is.numeric), ~ round(., 4)))
+
+# Export the coefficient table
+write_csv(model_coefficients, "./stage_7_models/Table_1_Fixed_Effects_t_pos.csv")
+cat("Exported Fixed Effects table to CSV.\n")
+
+# Format the R-squared values into a clean data frame
+r2_table <- data.frame(
+  Variance_Explained = c("Marginal (Fixed Effects)", "Conditional (Fixed + Random)"),
+  R_Squared = c(round(final_eco_model_rsq[1, "R2m"], 4), 
+                round(final_eco_model_rsq[1, "R2c"], 4))
+)
+
+# Export the R-squared table
+write_csv(r2_table, "./stage_7_models/Table_2_R_Squared_t_pos.csv")
+cat("Exported R-Squared table to CSV.\n")
+```
+
+###3.3 Plot
+```{r}
+# 1. Extract marginal effects for the interaction
+# ggeffects automatically handles the scale() back-transformation
+predicted_trends <- ggpredict(final_eco_model, terms = c("Rate [all]", "thermal_pos_index[-1,1]","Eco"))
+
+# 2. Build the plot
+plot_final_interaction <- ggplot(predicted_trends, aes(x = x, y = predicted, color = group, fill = group)) +
+  
+  # Add the confidence ribbons (no borders for a cleaner look)
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.2, color = NA) +
+  
+  # Add the predicted trend lines
+  geom_line(linewidth = 1.2) +
+  
+  # Reference lines for Zero Velocity (x=0) and Stable Population (y=0)
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
+  
+  # THE FIX: Added y = slope and sides = "bl" to show density on both axes
+  geom_rug(data = dataset_for_model, 
+           aes(x = Rate, y = slope, color = Eco), 
+           sides = "bl", alpha = 0.3, inherit.aes = FALSE) +
+  
+  # Match the aesthetic styling perfectly
+  scale_color_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f"),
+                     labels = c("Mar" = "Marine", "Ter" = "Terrestrial")) +
+  scale_fill_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f"),
+                    labels = c("Mar" = "Marine", "Ter" = "Terrestrial")) +
+  
+  # TRUNCATE THE AXES to show the biological reality, preventing the CIs 
+  # from flaring out endlessly at the extreme, data-poor boundaries.
+  # Note: Adjust the xlim and ylim if your data density sits slightly wider!
+  coord_cartesian(xlim = c(-29, 21), ylim = c(-1, 1)) + 
+  
+  theme_bw() +
+  labs(
+    x = expression("Range shift velocity (" * km ~ yr^-1 * ")"),
+    y = "Predicted temporal trend (annual slope)",
+    color = "Realm",
+    fill = "Realm"
+  ) +
+  theme(
+    legend.position = c(0.85, 0.85),
+    legend.background = element_rect(fill = "white", color = "grey60", linewidth = 0.3),
+    plot.title = element_text(face = "bold", size = 13),
+    axis.title = element_text(size = 11)
+  )
+
+# Print the plot in the document
+print(plot_final_interaction)
+
+# Save for the manuscript
+ggsave("./stage_7_models/Final_Interaction_Plot.png", 
+       plot = plot_final_interaction, width = 8, height = 6, dpi = 300)
+```
+
+
+Plot on original scale
+```{r}
+# 1. Calculate exact sample sizes for the caption
+n_mar <- sum(dataset_for_model$Eco == "Mar", na.rm = TRUE)
+n_ter <- sum(dataset_for_model$Eco == "Ter", na.rm = TRUE)
+
+# 2. Create a dynamic, formatted caption string with a line break (\n)
+r2_caption <- sprintf(
+  "Marginal R² = %.3f | Conditional R² = %.3f\nPopulations modeled (n): %d Marine | %d Terrestrial", 
+  final_eco_model_rsq[1, "R2m"], 
+  final_eco_model_rsq[1, "R2c"],
+  n_mar, 
+  n_ter
+)
+
+# 3. Extract marginal effects for the 3-way interaction
+predicted_trends <- ggpredict(final_eco_model, terms = c("Rate [all]", "Eco", "thermal_pos_index [-1, 0, 1]")) %>%
+  as.data.frame() %>%
+  mutate(facet = factor(facet, 
+                        levels = c("-1", "0", "1"), 
+                        labels = c("Cold edge (-1)", "Core range (0)", "Warm edge (+1)")))
+
+# 4. Build the Raw Scale Plot
+plot_final_interaction <- ggplot(predicted_trends, aes(x = x, y = predicted, color = group, fill = group, group = group)) +
+  
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.2, color = NA) +
+  geom_line(linewidth = 1.2) +
+  
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
+  
+  geom_rug(data = dataset_for_model, 
+           aes(x = Rate, y = slope, color = Eco), 
+           sides = "bl", alpha = 0.3, inherit.aes = FALSE) +
+           
+  facet_wrap(~facet) +
+  
+  scale_color_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f"),
+                     labels = c("Mar" = "Marine", "Ter" = "Terrestrial")) +
+  scale_fill_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f"),
+                    labels = c("Mar" = "Marine", "Ter" = "Terrestrial")) +
+  
+  coord_cartesian(xlim = c(-29, 21), ylim = c(-1, 1)) + 
+  
+  theme_bw() +
+  labs(
+    x = expression("Range shift velocity (" * km ~ yr^-1 * ")"),
+    y = "Predicted abundance trend (slope)",
+    color = "Realm",
+    fill = "Realm",
+    caption = r2_caption # Dynamically populated with R² and sample sizes
+  ) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 12),
+    strip.background = element_rect(fill = "grey90", color = "grey20"),
+    plot.title = element_text(face = "bold", size = 13),
+    axis.title = element_text(size = 11),
+    plot.caption = element_text(size = 10, face = "italic", color = "grey40", hjust = 1) 
+  )
+
+# Print and Save
+ggsave("./stage_7_models/Final_Interaction_Plot_Faceted.png", 
+       plot = plot_final_interaction, width = 10, height = 5, dpi = 300)
+```
+
+# 2. Build the plot
+# THE FIX: Added `group = group` explicitly to force the lines to draw
+plot_final_interaction <- ggplot(predicted_trends, aes(x = x, y = predicted, color = group, fill = group, group = group)) +
+  
+  # Add the confidence ribbons (no borders for a cleaner look)
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.2, color = NA) +
+  
+  # Add the predicted trend lines
+  geom_line(linewidth = 1.2) +
+  
+  # Reference lines for Zero Velocity (x=0) and Stable Population (y=0)
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
+  
+  # Rug marks to show density
+  geom_rug(data = dataset_for_model, 
+           aes(x = Rate, y = slope, color = Eco), 
+           sides = "bl", alpha = 0.3, inherit.aes = FALSE) +
+           
+  # Create side-by-side panels for the thermal positions
+  facet_wrap(~facet) +
+  
+  # Match the aesthetic styling perfectly
+  scale_color_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f"),
+                     labels = c("Mar" = "Marine", "Ter" = "Terrestrial")) +
+  scale_fill_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f"),
+                    labels = c("Mar" = "Marine", "Ter" = "Terrestrial")) +
+  
+  # TRUNCATE THE AXES to show the biological reality
+  coord_cartesian(xlim = c(-29, 21), ylim = c(-1, 1)) + 
+  
+  theme_bw() +
+  labs(
+    x = expression("Range shift velocity (" * km ~ yr^-1 * ")"),
+    y = "Predicted temporal trend (annual slope)",
+    color = "Realm",
+    fill = "Realm"
+  ) +
+  theme(
+    legend.position = "bottom", # Moved legend to bottom to accommodate the 3 panels
+    strip.text = element_text(face = "bold", size = 12),
+    strip.background = element_rect(fill = "grey90", color = "grey20"),
+    plot.title = element_text(face = "bold", size = 13),
+    axis.title = element_text(size = 11)
+  )
+
+# Print the plot in the document
+print(plot_final_interaction)
+
+# Save for the manuscript
+ggsave("./stage_7_models/Final_Interaction_Plot_Faceted.png", 
+       plot = plot_final_interaction, width = 10, height = 5, dpi = 300)
+```
