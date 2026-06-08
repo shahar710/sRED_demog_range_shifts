@@ -1,5 +1,5 @@
 ---
-title: "stage_5_models"
+title: "stage_7_models"
 author: "Shahar Chaikin"
 date: "2026-05-19"
 output: html_document
@@ -69,7 +69,7 @@ dataset_for_model <- read_rds("./stage_4_bind_biotime_bioshifts/master_populatio
   ) %>% 
   ungroup()
 
-
+#write_rds(dataset_for_model,"./stage_7_models/dataset_for_model.rds")
 ```
 
 ## 3.Modeling
@@ -102,7 +102,7 @@ check_singularity(final_eco_model)
 sim_res <- simulateResiduals(fittedModel = final_eco_model, plot = TRUE,n = 70)
 
 
-saveRDS(final_eco_model,"./stage_7_models/final_eco_model_t_pos.rds")
+#saveRDS(final_eco_model,"./stage_7_models/final_eco_model_t_pos.rds")
 summary(final_eco_model)
 final_eco_model_rsq = r.squaredGLMM(final_eco_model)
 final_eco_model_rsq
@@ -227,31 +227,20 @@ ggsave("./stage_7_models/Final_Interaction_Plot.png",
        plot = plot_final_interaction, width = 8, height = 6, dpi = 300)
 ```
 
-
 Plot on original scale
 ```{r}
-# 1. Calculate exact sample sizes for the caption
-n_mar <- sum(dataset_for_model$Eco == "Mar", na.rm = TRUE)
-n_ter <- sum(dataset_for_model$Eco == "Ter", na.rm = TRUE)
-
-# 2. Create a dynamic, formatted caption string with a line break (\n)
-r2_caption <- sprintf(
-  "Marginal R² = %.3f | Conditional R² = %.3f\nPopulations modeled (n): %d Marine | %d Terrestrial", 
-  final_eco_model_rsq[1, "R2m"], 
-  final_eco_model_rsq[1, "R2c"],
-  n_mar, 
-  n_ter
-)
-
-# 3. Extract marginal effects for the 3-way interaction
-predicted_trends <- ggpredict(final_eco_model, terms = c("Rate [all]", "Eco", "thermal_pos_index [-1, 0, 1]")) %>%
+# 1. Extract marginal effects
+predicted_trends_orig <- ggpredict(final_eco_model, terms = c("Rate [all]", "Eco", "thermal_pos_index [-1, 0, 1]")) %>%
   as.data.frame() %>%
   mutate(facet = factor(facet, 
                         levels = c("-1", "0", "1"), 
-                        labels = c("Cold edge (-1)", "Core range (0)", "Warm edge (+1)")))
+                        labels = c("Cold Edge (-1)", "Core Range (0)", "Warm Edge (+1)")))
 
-# 4. Build the Raw Scale Plot
-plot_final_interaction <- ggplot(predicted_trends, aes(x = x, y = predicted, color = group, fill = group, group = group)) +
+# Generate the exact mathematical positions for 20% jumps
+target_breaks <- log(1 + seq(-0.8, 1.8, by = 0.2))
+
+# 2. Build the Percentage Scale Plot
+plot_final_interaction_orig <- ggplot(predicted_trends_orig, aes(x = x, y = predicted, color = group, fill = group, group = group)) +
   
   geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.2, color = NA) +
   geom_line(linewidth = 1.2) +
@@ -270,15 +259,20 @@ plot_final_interaction <- ggplot(predicted_trends, aes(x = x, y = predicted, col
   scale_fill_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f"),
                     labels = c("Mar" = "Marine", "Ter" = "Terrestrial")) +
   
-  coord_cartesian(xlim = c(-29, 21), ylim = c(-1, 1)) + 
+  scale_y_continuous(
+    breaks = target_breaks,
+    labels = function(x) paste0(round((exp(x) - 1) * 100, 1), "%")
+  ) +
+  
+  coord_cartesian(xlim = c(-15, 15), ylim = c(-1, 1)) + 
   
   theme_bw() +
   labs(
     x = expression("Range shift velocity (" * km ~ yr^-1 * ")"),
-    y = "Predicted abundance trend (slope)",
+    y = "Annual population change (%)", 
     color = "Realm",
     fill = "Realm",
-    caption = r2_caption # Dynamically populated with R² and sample sizes
+    caption = r2_caption # Added the exact same dynamic caption here
   ) +
   theme(
     legend.position = "bottom",
@@ -290,60 +284,329 @@ plot_final_interaction <- ggplot(predicted_trends, aes(x = x, y = predicted, col
   )
 
 # Print and Save
-ggsave("./stage_7_models/Final_Interaction_Plot_Faceted.png", 
-       plot = plot_final_interaction, width = 10, height = 5, dpi = 300)
+ggsave("./stage_7_models/Final_Interaction_Plot2_Faceted.png", 
+       plot = plot_final_interaction_orig, width = 10, height = 5, dpi = 300)
 ```
 
-# 2. Build the plot
-# THE FIX: Added `group = group` explicitly to force the lines to draw
-plot_final_interaction <- ggplot(predicted_trends, aes(x = x, y = predicted, color = group, fill = group, group = group)) +
+slopes~thermal position
+```{r}
+# 1. Extract marginal effects (X = Thermal Position, Color = Eco)
+# By omitting 'Rate' from terms, it is automatically held at its mean (0 km/yr)
+predicted_pure_thermal <- ggpredict(final_eco_model, terms = c("thermal_pos_index [all]", "Eco")) %>%
+  as.data.frame()
+
+# 2. Re-calculate caption 
+n_mar <- sum(dataset_for_model$Eco == "Mar", na.rm = TRUE)
+n_ter <- sum(dataset_for_model$Eco == "Ter", na.rm = TRUE)
+r2_caption <- sprintf(
+  "Marginal R² = %.3f | Conditional R² = %.3f\nPopulations modeled (n): %d Marine | %d Terrestrial", 
+  final_eco_model_rsq[1, "R2m"], final_eco_model_rsq[1, "R2c"], n_mar, n_ter
+)
+
+# 3. Build the Raw Scale Plot (No Facets)
+plot_pure_thermal <- ggplot(predicted_pure_thermal, aes(x = x, y = predicted, color = group, fill = group, group = group)) +
   
-  # Add the confidence ribbons (no borders for a cleaner look)
   geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.2, color = NA) +
-  
-  # Add the predicted trend lines
   geom_line(linewidth = 1.2) +
   
-  # Reference lines for Zero Velocity (x=0) and Stable Population (y=0)
+  # Y=0 is a stable population. X=0 is the thermal core of the species' range.
   geom_hline(yintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
   geom_vline(xintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
   
-  # Rug marks to show density
+  # Rug marks mapping the density of the thermal positions
   geom_rug(data = dataset_for_model, 
-           aes(x = Rate, y = slope, color = Eco), 
+           aes(x = thermal_pos_index, y = slope, color = Eco), 
            sides = "bl", alpha = 0.3, inherit.aes = FALSE) +
-           
-  # Create side-by-side panels for the thermal positions
-  facet_wrap(~facet) +
   
-  # Match the aesthetic styling perfectly
   scale_color_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f"),
                      labels = c("Mar" = "Marine", "Ter" = "Terrestrial")) +
   scale_fill_manual(values = c("Mar" = "#0077b6", "Ter" = "#2a9d8f"),
                     labels = c("Mar" = "Marine", "Ter" = "Terrestrial")) +
   
-  # TRUNCATE THE AXES to show the biological reality
-  coord_cartesian(xlim = c(-29, 21), ylim = c(-1, 1)) + 
+  # Truncating the X-axis to the biological bulk of the thermal index 
+  coord_cartesian(xlim = c(-1.5, 1.5), ylim = c(-1, 1)) + 
   
   theme_bw() +
   labs(
-    x = expression("Range shift velocity (" * km ~ yr^-1 * ")"),
+    title = "Overall population trends across the thermal niche",
+    x = "Thermal Position Index (Cold Edge <--- 0 ---> Warm Edge)",
     y = "Predicted temporal trend (annual slope)",
     color = "Realm",
-    fill = "Realm"
+    fill = "Realm",
+    caption = r2_caption
   ) +
   theme(
-    legend.position = "bottom", # Moved legend to bottom to accommodate the 3 panels
+    legend.position = c(0.85, 0.85), # Moved legend inside the plot area for a single panel
+    legend.background = element_rect(fill = "white", color = "grey60", linewidth = 0.3),
+    plot.title = element_text(face = "bold", size = 13),
+    axis.title = element_text(size = 11),
+    plot.caption = element_text(size = 10, face = "italic", color = "grey40", hjust = 1) 
+  )
+
+ggsave("./stage_7_models/Pure_Thermal_Perspective_Plot.png", 
+       plot = plot_pure_thermal, width = 8, height = 6, dpi = 300)
+```
+
+#4) class level
+```{r}
+# 1. Determine which classes have enough statistical power
+# Must have >50 populations AND at least 5 distinct species
+valid_classes <- dataset_for_model %>%
+  group_by(class) %>%
+  summarise(n_pops = n(), n_species = n_distinct(species_harmonized)) %>%
+  filter(n_pops >= 100, n_species >= 5) %>%
+  pull(class)
+
+# 2. Filter, drop unused levels, and PRE-SCALE variables safely
+class_dataset <- dataset_for_model %>%
+  filter(class %in% valid_classes) %>%
+  mutate(
+    class = droplevels(class),
+    # Pre-scaling prevents Hessian calculation errors in glmmTMB
+    Rate_scaled = as.numeric(scale(Rate)),
+    thermal_pos_scaled = as.numeric(scale(thermal_pos_index))
+  )
+
+cat("Modeling across", n_distinct(class_dataset$class), "robust classes:\n")
+print(table(class_dataset$class))
+```
+
+##4.1) Fit the Class-Level Model (Realm removed)
+```{r class_model}
+class_only_model <- glmmTMB(
+  
+  # A pure 3-way interaction to test taxonomic differences
+ slope ~ Rate_scaled * class * thermal_pos_scaled + 
+    
+    (1 | species_harmonized) + 
+    (1 | h3_id), 
+    # (1 | ID_BioShifts) is dropped to prevent confounding
+  
+  data = class_dataset,
+  
+  # Scaled weights to prevent variance collapse
+  weights = weight_years, 
+  
+  family = gaussian(),
+  
+  # THE FIX 2: Correct syntax for passing arguments to the BFGS optimizer
+  control = glmmTMBControl(
+    optimizer = optim,
+    optArgs = list(method = "BFGS"),    # The engine
+    optCtrl = list(maxit = 10000)       # The max iterations
+  )
+)
+
+#diagnostics
+check_convergence(class_only_model)
+check_collinearity(class_only_model)
+check_singularity(class_only_model)
+sim_res <- simulateResiduals(fittedModel = class_only_model, plot = TRUE,n = 70)
+
+
+saveRDS(class_only_model, "./stage_7_models/class_only_model_t_pos.rds")
+
+summary(class_only_model)
+class_model_rsq <- r.squaredGLMM(class_only_model)
+print(class_model_rsq)
+```
+
+```{r class_plot, fig.width=12, fig.height=6}
+## 4. Plotting Class-Level Predictions (Gaussian Model)
+library(ggeffects)
+
+# 1. Extract marginal effects using the PRE-SCALED variable names
+predicted_class_trends <- ggpredict(class_only_model, 
+                                    terms = c("Rate_scaled [all]", "class", "thermal_pos_scaled [-1, 0, 1]")) %>%
+  as.data.frame() %>%
+  mutate(facet = factor(facet, 
+                        levels = c("-1", "0", "1"), 
+                        labels = c("Cold Edge (-1)", "Core Range (0)", "Warm Edge (+1)")))
+
+# 2. Setup dynamic caption
+class_model_rsq <- MuMIn::r.squaredGLMM(class_only_model)
+r2_caption_class <- sprintf(
+  "Marginal R² = %.3f | Conditional R² = %.3f\nPopulations modeled (n): %d across %d classes", 
+  class_model_rsq[1, "R2m"], class_model_rsq[1, "R2c"], 
+  nrow(class_dataset), n_distinct(class_dataset$class)
+)
+
+# 3. Define breaks for percentage scale (assuming slope is log-ratio)
+target_breaks <- log(1 + seq(-0.8, 1.8, by = 0.2))
+
+# 4. Build the Plot
+plot_class_interaction <- ggplot(predicted_class_trends, aes(x = x, y = predicted, color = group, fill = group, group = group)) +
+  
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1.2) +
+  
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
+  
+  # Rug marks matched to class (using scaled variables to match the x-axis)
+  geom_rug(data = class_dataset, 
+           aes(x = Rate_scaled, y = slope, color = class), 
+           sides = "bl", alpha = 0.3, inherit.aes = FALSE) +
+           
+  facet_wrap(~facet) +
+  
+  scale_color_viridis_d(option = "turbo", end = 0.9) +
+  scale_fill_viridis_d(option = "turbo", end = 0.9) +
+  
+  scale_y_continuous(
+    breaks = target_breaks,
+    labels = function(x) paste0(round((exp(x) - 1) * 100, 1), "%")
+  ) +
+  
+  # Note: Because the X-axis is now scaled, we adjust the xlim constraints
+  coord_cartesian(xlim = c(-3, 3), ylim = c(-1, 1)) + 
+  
+  theme_bw() +
+  labs(
+    x = "Range shift velocity (Scaled)",
+    y = "Annual population change (%)", 
+    color = "Taxonomic Class",
+    fill = "Taxonomic Class",
+    caption = r2_caption_class
+  ) +
+  theme(
+    legend.position = "bottom",
     strip.text = element_text(face = "bold", size = 12),
     strip.background = element_rect(fill = "grey90", color = "grey20"),
     plot.title = element_text(face = "bold", size = 13),
-    axis.title = element_text(size = 11)
+    axis.title = element_text(size = 11),
+    plot.caption = element_text(size = 10, face = "italic", color = "grey40", hjust = 1) 
   )
 
-# Print the plot in the document
-print(plot_final_interaction)
-
-# Save for the manuscript
-ggsave("./stage_7_models/Final_Interaction_Plot_Faceted.png", 
-       plot = plot_final_interaction, width = 10, height = 5, dpi = 300)
+print(plot_class_interaction)
+ggsave("./stage_7_models/Class_Interaction_Plot_Faceted.png", 
+       plot = plot_class_interaction, width = 12, height = 5, dpi = 300)
 ```
+
+#5) Chaikin et et al., 2024 populations
+
+Extract hexagons
+```{r}
+library(sf)
+library(h3jsr)
+
+chaikin_2020_pop=read.csv("C:\\Users\\User\\Desktop\\research\\working groups\\iDiv_2024_25_sRED\\R\\sRED_demog_range_shifts\\25006787\\data.csv")
+
+# 1. Map the 2024 paper populations to H3 Resolution 3
+chaikin_2024_mapped <- chaikin_2020_pop %>%
+  # Filter out any populations missing coordinates just to be safe
+  filter(!is.na(longitude_mean) & !is.na(latitude_mean)) %>%
+  
+  # Convert the dataframe to an sf spatial object
+  # remove = FALSE ensures your original lat/lon columns stay in the dataframe
+  st_as_sf(coords = c("longitude_mean", "latitude_mean"), crs = 4326, remove = FALSE) %>%
+  
+  # Extract the H3 resolution 3 hexagon ID based on the point geometry
+  mutate(h3_id = point_to_cell(geometry, res = 3)) %>%
+  
+  # Drop the sf geometry column to return it to a clean, standard dataframe
+  st_drop_geometry()
+
+# Quick check to verify the new column
+cat("Mapped", nrow(chaikin_2024_mapped), "populations to", n_distinct(chaikin_2024_mapped$h3_id), "unique H3 hexagons.\n")
+
+head(chaikin_2024_mapped %>% select(unique_id, species, latitude_mean, longitude_mean, h3_id))
+```
+
+Subset the recent data
+```{r}
+# 1. Subset the new dataset using the spatial and taxonomic footprints of the old dataset
+chaikin_2024_subset <- dataset_for_model %>%
+  semi_join(chaikin_2024_mapped, 
+            by = c("h3_id" = "h3_id", "species_harmonized" = "species")) %>%
+  # Ensure the factor levels are clean after subsetting
+  mutate(
+    species_harmonized = droplevels(species_harmonized),
+    h3_id = droplevels(h3_id)
+  )
+
+# Let's see how many populations survived the crosswalk
+cat("Original 2024 populations:", nrow(chaikin_2024_mapped), "\n")
+cat("Matched populations in new synthesis:", nrow(chaikin_2024_subset), "\n")
+cat("Proportion retained:", round((nrow(chaikin_2024_subset) / nrow(chaikin_2024_mapped)) * 100, 1), "%\n")
+cat("Unique matched species:", n_distinct(chaikin_2024_subset$species_harmonized), "\n")
+```
+
+```{r}
+# 2. Fit the 2-way sensitivity model
+sensitivity_model <- glmmTMB(
+  
+  # The 2-way interaction: Does velocity impact abundance differently depending on thermal edge?
+  slope ~ scale(Rate) * scale(thermal_pos_index) + 
+    
+    (1 | species_harmonized) + 
+    (1 | h3_id), 
+    # Note: If this crashes, drop (1 | ID_BioShifts) if your old data only spans 1 or 2 studies
+  
+  data = chaikin_2024_subset,
+  weights = weight_years, 
+  family = gaussian(),
+  
+  control = glmmTMBControl(
+    optCtrl = list(iter.max = 10000, eval.max = 10000)
+  )
+)
+
+# Diagnostics and Summary
+check_convergence(sensitivity_model)
+summary(sensitivity_model)
+```
+
+```{r}
+library(ggeffects)
+
+# Extract marginal effects
+predicted_sens <- ggpredict(sensitivity_model, 
+                            terms = c("Rate [all]", "thermal_pos_index [-1, 0, 1]")) %>%
+  as.data.frame() %>%
+  mutate(facet = factor(group, 
+                        levels = c("-1", "0", "1"), 
+                        labels = c("Cold Edge (-1)", "Core Range (0)", "Warm Edge (+1)")))
+
+# Define breaks for percentage scale
+target_breaks <- log(1 + seq(-0.8, 1.8, by = 0.2))
+
+# Build the Plot
+plot_sensitivity <- ggplot(predicted_sens, aes(x = x, y = predicted)) +
+  
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.2, fill = "#0077b6") +
+  geom_line(color = "#0077b6", linewidth = 1.2) +
+  
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
+  
+  # Add the raw data as background points to show the subset footprint
+  geom_point(data = chaikin_2024_subset, 
+             aes(x = Rate, y = slope), 
+             alpha = 0.1, color = "grey40", size = 1, inherit.aes = FALSE) +
+             
+  facet_wrap(~facet) +
+  
+  scale_y_continuous(
+    breaks = target_breaks,
+    labels = function(x) paste0(round((exp(x) - 1) * 100, 1), "%")
+  ) +
+  
+  coord_cartesian(xlim = c(-15, 15), ylim = c(-1, 1)) + 
+  
+  theme_bw() +
+  labs(
+    title = "Sensitivity Analysis: Chaikin et al. (2024) Baseline",
+    subtitle = paste("n =", nrow(chaikin_2024_subset), "matched populations"),
+    x = expression("Range shift velocity (" * km ~ yr^-1 * ")"),
+    y = "Annual population change (%)"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold", size = 12),
+    strip.background = element_rect(fill = "grey90", color = "grey20"),
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+print(plot_sensitivity)
+```
+
