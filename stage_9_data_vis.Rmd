@@ -1,0 +1,489 @@
+---
+title: "stage_9_data_vis"
+author: "Shahar Chaikin"
+date: "2026-06-08"
+output: html_document
+---
+
+Load the data
+
+---
+title: "stage_9_data_vis"
+author: "Shahar Chaikin"
+date: "2026-06-08"
+output: html_document
+---
+
+Load the data
+
+```{r setup_and_data}
+# Data manipulation and visualization
+library(tidyverse)
+library(sf)
+library(h3jsr)
+library(rnaturalearth)
+library(patchwork)
+library(maps)
+
+# Turn off the strict spherical geometry engine to ignore duplicate vertices
+sf::sf_use_s2(FALSE)
+
+# Load the model dataset
+dataset_for_model = read_rds("./stage_7_models/dataset_for_model.rds")
+```
+
+#1) Generate summary_df (Linear Models)
+
+```{r}
+# Extract ALL unique, valid species from the dataset
+all_species <- dataset_for_model %>%
+  filter(!is.na(species_harmonized), species_harmonized != "") %>%
+  pull(species_harmonized) %>%
+  unique()
+
+total_sp <- length(all_species)
+cat("Starting batch processing for", total_sp, "species...\n")
+
+# Create the output directory
+lm_out_dir <- "./stage_8_proof_of_con/lm_plots_all"
+dir.create(lm_out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Initialize a list to hold the data for the CSV
+results_list <- list()
+
+# Execution Loop
+for (i in seq_along(all_species)) {
+  
+  sp <- all_species[i]
+  
+  # A. Filter and prep data
+  sp_data <- dataset_for_model %>%
+    filter(species_harmonized == sp) %>%
+    drop_na(thermal_pos_index, slope, total_sampled_years) %>%
+    filter(total_sampled_years > 1) 
+  
+  if (nrow(sp_data) < 3) {
+    cat(sprintf("[%d/%d] SKIPPED (n=%d): %s\n", i, total_sp, nrow(sp_data), sp))
+    next
+  }
+
+  # Extract Ecosystem to determine ribbon color
+  sp_eco <- as.character(sp_data$Eco[1])
+  ribbon_color <- ifelse(sp_eco == "Mar", "dodgerblue", "forestgreen")
+  
+  # Calculate Mean Range Shift Velocity (Rate)
+  sp_mean_rate <- mean(sp_data$Rate, na.rm = TRUE)
+  rate_label <- ifelse(
+    is.nan(sp_mean_rate), 
+    "Shift: NA", 
+    paste0("Shift: ", round(sp_mean_rate, 2), " km/yr")
+  )
+  
+  # B. Run the model safely using tryCatch
+  model_success <- tryCatch({
+    sp_lm <- lm(slope ~ thermal_pos_index, data = sp_data, weights = log(total_sampled_years))
+    TRUE
+  }, error = function(e) {
+    FALSE
+  })
+  
+  if (!model_success) {
+    cat(sprintf("[%d/%d] FAILED (Math Error): %s\n", i, total_sp, sp))
+    
+    # Record failed models in the CSV as NA
+    results_list[[i]] <- tibble(
+      species = sp, ecosystem = sp_eco, mean_rate = sp_mean_rate, 
+      n_populations = nrow(sp_data), slope_value = NA, p_value = NA
+    )
+    next
+  }
+  
+  # C. Extract P-Value and Slope
+  coef_table <- summary(sp_lm)$coefficients
+  if (nrow(coef_table) > 1) {
+    slope_val <- coef_table[2, 1] # Extract the actual slope estimate
+    p_val_raw <- coef_table[2, 4]
+    p_label <- ifelse(p_val_raw < 0.001, "p < 0.001", paste0("p = ", round(p_val_raw, 3)))
+  } else {
+    slope_val <- NA
+    p_val_raw <- NA
+    p_label <- "p = NA"
+  }
+  
+  # Append data to results list for the CSV
+  results_list[[i]] <- tibble(
+    species = sp,
+    ecosystem = sp_eco,
+    mean_rate = sp_mean_rate,
+    n_populations = nrow(sp_data),
+    slope_value = slope_val,
+    p_value = p_val_raw
+  )
+  
+  # D. Extract Predictions and Bind
+  predictions <- predict(sp_lm, interval = "confidence", level = 0.95)
+  sp_data <- bind_cols(sp_data, as_tibble(predictions))
+  
+  # E. Build the Scatter Plot
+  p_lm <- ggplot(data = sp_data, aes(x = thermal_pos_index)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
+    geom_point(aes(y = slope, size = total_sampled_years), shape = 21, fill = "grey70", color = "black", alpha = 0.6) +
+    
+    geom_ribbon(aes(ymin = lwr, ymax = upr), fill = ribbon_color, alpha = 0.35) +
+    geom_line(aes(y = fit), color = "black", linewidth = 1.2) +
+    
+    theme_classic() +
+    labs(
+      title = paste("Weighted Thermal Response:", sp),
+      subtitle = paste0("n = ", nrow(sp_data), " pops | ", p_label, " | ", rate_label),
+      x = "Thermal position",
+      y = "Slope (annual population change)"
+    ) +
+    theme(
+      plot.title = element_text(face = "bold.italic", size = 14),
+      panel.grid.minor = element_blank()
+    )
+  
+  # F. Export
+  safe_filename <- paste0(gsub("[^[:alnum:]]", "_", sp), "_lm_plot.pdf")
+  save_path <- file.path(lm_out_dir, safe_filename)
+  
+  suppressMessages({
+    ggsave(filename = save_path, plot = p_lm, width = 7, height = 5, device = "pdf")
+  })
+  
+  cat(sprintf("[%d/%d] SAVED: %s\n", i, total_sp, sp))
+}
+
+# Compile and Save the CSV
+cat("\nPlotting complete. Compiling summary statistics...\n")
+summary_df <- bind_rows(results_list)
+
+# Define path for CSV export
+csv_out_path <- "./stage_8_proof_of_con/species_lm_summary.csv"
+write_csv(summary_df, csv_out_path)
+
+cat("Summary statistics saved to:", csv_out_path, "\n")
+```
+
+#2) Map negative associations
+```{r}
+# 1. Load the summary CSV and filter for significant (p < 0.05) negative slopes
+summary_df <- read_csv("./stage_8_proof_of_con/species_lm_summary.csv")
+
+target_species <- summary_df %>%
+  filter(p_value < 0.05, slope_value < 0) %>%
+  pull(species)
+
+cat("Found", length(target_species), "species with significant negative slopes.\n")
+
+# 2. REBUILD SPATIAL DATA FOR ALL TARGET SPECIES
+map_data_all <- dataset_for_model %>%
+  filter(species_harmonized %in% target_species) %>%
+  drop_na(h3_id, thermal_pos_index) %>% 
+  filter(h3_id != "") %>%
+  mutate(plot_thermal_pos = pmin(pmax(thermal_pos_index, -1), 1)) %>%
+  group_by(species_harmonized, h3_id) %>%
+  summarise(
+    hex_thermal_pos = mean(plot_thermal_pos, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+map_data_all$geometry <- cell_to_polygon(map_data_all$h3_id, simple = TRUE)
+hex_sf_all <- st_as_sf(map_data_all, crs = 4326)
+
+# 3. Create the output directory
+map_out_dir <- "./stage_8_proof_of_con/significant_negative_maps"
+dir.create(map_out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# 4. Base Map Preparation
+world_sf <- st_as_sf(maps::map("world", plot = FALSE, fill = TRUE))
+world_sf <- st_make_valid(world_sf)
+
+# 5. Map Generation Loop
+for (sp in target_species) {
+  
+  # A. Filter spatial data and CLEAN GEOMETRY to prevent graphics crash
+  sp_data <- hex_sf_all %>% 
+    filter(species_harmonized == sp) %>%
+    st_make_valid() %>% 
+    st_buffer(dist = 0) # This forces sf to repair self-intersecting polygon borders
+  
+  if (nrow(sp_data) == 0) {
+    cat("Skipping", sp, "- no spatial data found.\n")
+    next
+  }
+  
+  # Fetch the specific shift rate for this species from the summary CSV
+  sp_rate <- summary_df %>% 
+    filter(species == sp) %>% 
+    pull(mean_rate)
+  
+  # B. Calculate the dynamic center of the species range
+  centroid <- st_coordinates(st_centroid(st_union(sp_data)))
+  lon_0 <- centroid[1, "X"]
+  lat_0 <- centroid[1, "Y"]
+  
+  dynamic_ortho <- paste0("+proj=ortho +lon_0=", lon_0, " +lat_0=", lat_0)
+  
+  # C. Calculate dynamic zoom limits in meters
+  sp_proj <- st_transform(sp_data, crs = dynamic_ortho)
+  bx <- st_bbox(sp_proj)
+  
+  x_range <- bx["xmax"] - bx["xmin"]
+  y_range <- bx["ymax"] - bx["ymin"]
+  
+  buffer_x <- max(x_range * 0.2, 500000) 
+  buffer_y <- max(y_range * 0.2, 500000)
+  
+  # D. Build and Export the Plot safely
+  safe_filename <- paste0(gsub("[^[:alnum:]]", "_", sp), "_map.pdf")
+  save_path <- file.path(map_out_dir, safe_filename)
+  
+  # Use tryCatch so a graphics crash doesn't kill the whole loop
+  tryCatch({
+    p_map <- ggplot() +
+      geom_sf(data = world_sf, fill = "grey90", color = "white", linewidth = 0.1) +
+      geom_sf(data = sp_data, aes(fill = hex_thermal_pos), color = "black", linewidth = 0.15, alpha = 0.9) +
+      
+      scale_fill_gradient2(low = "#3182bd", mid = "grey85", high = "#de2d26", midpoint = 0,
+                           limits = c(-1, 1), name = "Thermal\nPosition") +
+      
+      coord_sf(
+        crs = dynamic_ortho, 
+        default_crs = dynamic_ortho, 
+        xlim = c(bx["xmin"] - buffer_x, bx["xmax"] + buffer_x), 
+        ylim = c(bx["ymin"] - buffer_y, bx["ymax"] + buffer_y), 
+        expand = FALSE
+      ) +
+      
+      theme_bw() + 
+      labs(
+        title = sp,
+        subtitle = paste0("Mean range shift velocity: ", round(sp_rate, 2), " km/yr")
+      ) +
+      theme(
+        panel.background = element_rect(fill = "white", color = NA),
+        panel.grid.major = element_line(color = "grey70", linetype = "dashed", linewidth = 0.3),
+        plot.title = element_text(face = "bold.italic")
+      )
+    
+    suppressMessages({
+      ggsave(filename = save_path, plot = p_map, width = 6, height = 6, dpi = 300, bg = "white", device=cairo_pdf)
+    })
+    
+    cat("Exported map for:", sp, "\n")
+    
+  }, error = function(e) {
+    while (!is.null(dev.list())) dev.off()
+    cat("GRAPHICS ERROR - Skipped:", sp, "\n")
+  })
+}
+
+cat("\nAll significant maps processed.\n")
+```
+
+#3) Map candidates (World Globe)
+```{r}
+# 1. Define the specific 3 species you want for this map
+target_hub_species <- c("Turdus merula", "Homarus americanus", "Oncorhynchus tshawytscha")
+
+# Build the spatial data directly from the raw dataset to guarantee all 3 are present
+map_data <- dataset_for_model %>%
+  filter(species_harmonized %in% target_hub_species) %>%
+  drop_na(h3_id, thermal_pos_index) %>% 
+  filter(h3_id != "") %>%
+  mutate(plot_thermal_pos = pmin(pmax(thermal_pos_index, -1), 1)) %>%
+  group_by(species_harmonized, h3_id) %>%
+  summarise(hex_thermal_pos = mean(plot_thermal_pos, na.rm = TRUE), .groups = "drop")
+
+# Convert to sf object
+map_data$geometry <- cell_to_polygon(map_data$h3_id, simple = TRUE)
+hex_sf_filtered <- st_as_sf(map_data, crs = 4326)
+
+# 2. Base Map
+world_sf <- st_as_sf(maps::map("world", plot = FALSE, fill = TRUE))
+world_sf <- st_make_valid(world_sf)
+
+# 3. Generate Bounding Boxes (Width Heuristic)
+bbox_list <- list()
+
+for (sp in unique(hex_sf_filtered$species_harmonized)) {
+  sp_data <- hex_sf_filtered %>% filter(species_harmonized == sp)
+  
+  if (nrow(sp_data) > 0) {
+    bx <- st_bbox(sp_data)
+    width <- bx["xmax"] - bx["xmin"]
+    
+    if (width > 150) {
+      # Split by Centroid
+      centroids <- st_coordinates(st_centroid(sp_data))[, 1]
+      west_pac <- sp_data[centroids > 0, ]
+      east_pac <- sp_data[centroids <= 0, ]
+      
+      if (nrow(west_pac) >= 5) {
+        bx_w <- st_bbox(west_pac)
+        coords_w <- matrix(c(bx_w["xmin"]-5, bx_w["ymin"]-5, bx_w["xmax"]+5, bx_w["ymin"]-5,
+                             bx_w["xmax"]+5, bx_w["ymax"]+5, bx_w["xmin"]-5, bx_w["ymax"]+5,
+                             bx_w["xmin"]-5, bx_w["ymin"]-5), ncol=2, byrow=TRUE)
+        bbox_list[[paste0(sp, "_w")]] <- st_polygon(list(coords_w)) %>% st_sfc(crs = 4326) %>% st_sf(species = sp)
+      }
+      
+      if (nrow(east_pac) >= 5) {
+        bx_e <- st_bbox(east_pac)
+        coords_e <- matrix(c(bx_e["xmin"]-5, bx_e["ymin"]-5, bx_e["xmax"]+5, bx_e["ymin"]-5,
+                             bx_e["xmax"]+5, bx_e["ymax"]+5, bx_e["xmin"]-5, bx_e["ymax"]+5,
+                             bx_e["xmin"]-5, bx_e["ymin"]-5), ncol=2, byrow=TRUE)
+        bbox_list[[paste0(sp, "_e")]] <- st_polygon(list(coords_e)) %>% st_sfc(crs = 4326) %>% st_sf(species = sp)
+      }
+      
+    } else {
+      coords_s <- matrix(c(bx["xmin"]-5, bx["ymin"]-5, bx["xmax"]+5, bx["ymin"]-5,
+                           bx["xmax"]+5, bx["ymax"]+5, bx["xmin"]-5, bx["ymax"]+5,
+                           bx["xmin"]-5, bx["ymin"]-5), ncol=2, byrow=TRUE)
+      bbox_list[[sp]] <- st_polygon(list(coords_s)) %>% st_sfc(crs = 4326) %>% st_sf(species = sp)
+    }
+  }
+}
+boxes_sf <- bind_rows(bbox_list)
+
+# Define the projection explicitly
+my_ortho <- "+proj=ortho +lon_0=-90 +lat_0=60"
+
+# 4. Build the Globe View
+p_globe <- ggplot() +
+  geom_sf(data = world_sf, fill = "grey90", color = "white", linewidth = 0.1) +
+  geom_sf(data = hex_sf_filtered, aes(fill = hex_thermal_pos), color = "black", linewidth = 0.05, alpha = 0.9) +
+  geom_sf(data = boxes_sf, fill = NA, color = "black", linewidth = 0.8) +
+  
+  scale_fill_gradient2(low = "#3182bd", mid = "grey85", high = "#de2d26", midpoint = 0,
+                       limits = c(-1, 1), name = "Thermal\nPosition") +
+  
+  coord_sf(
+    crs = my_ortho, 
+    default_crs = my_ortho, 
+    xlim = c(-6000000, 6000000), 
+    ylim = c(-3000000, 5000000), 
+    expand = FALSE
+  ) +
+  
+  theme_bw() + 
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_line(color = "grey70", linetype = "dashed", linewidth = 0.3)
+  )
+
+print(p_globe)
+
+# Export using the cairo_pdf device
+ggsave(
+  "./stage_8_proof_of_con/Global_Globe_View_Fixed.pdf", 
+  plot = p_globe, 
+  width = 8, 
+  height = 8, 
+  device = cairo_pdf
+)
+```
+
+#4) Plot candidates (Specific LM Plots)
+```{r}
+# 1. Define the 3 specific target species
+target_species <- c("Turdus merula", "Homarus americanus", "Oncorhynchus tshawytscha")
+
+# 2. Create the output directory
+lm_specific_dir <- "./stage_8_proof_of_con/lm_specific_plots"
+dir.create(lm_specific_dir, showWarnings = FALSE, recursive = TRUE)
+
+# 3. Execution Loop
+for (sp in target_species) {
+  
+  # A. Filter and prep data
+  sp_data <- dataset_for_model %>%
+    filter(species_harmonized == sp) %>%
+    drop_na(thermal_pos_index, slope, total_sampled_years) %>%
+    filter(total_sampled_years > 1) 
+  
+  if (nrow(sp_data) < 3) {
+    cat("Skipping", sp, "- insufficient data points.\n")
+    next
+  }
+  
+  # Extract Ecosystem for ribbon color
+  sp_eco <- as.character(sp_data$Eco[1])
+  ribbon_color <- ifelse(sp_eco == "Mar", "dodgerblue", "forestgreen")
+  
+  # Calculate Shift Rate
+  sp_mean_rate <- mean(sp_data$Rate, na.rm = TRUE)
+  rate_label <- ifelse(
+    is.nan(sp_mean_rate), 
+    "NA", 
+    paste0(round(sp_mean_rate, 2), " km/yr")
+  )
+  
+  # B. Run the linear model
+  sp_lm <- tryCatch({
+    lm(slope ~ thermal_pos_index, data = sp_data, weights = log(total_sampled_years))
+  }, error = function(e) { NULL })
+  
+  if (is.null(sp_lm)) next
+  
+  # C. Extract P-Value
+  coef_table <- summary(sp_lm)$coefficients
+  if (nrow(coef_table) > 1) {
+    p_val_raw <- coef_table[2, 4]
+    p_label <- ifelse(p_val_raw < 0.001, "p < 0.001", paste0("p = ", round(p_val_raw, 3)))
+  } else {
+    p_label <- "p = NA"
+  }
+  
+  # D. Extract Predictions and Bind
+  predictions <- predict(sp_lm, interval = "confidence", level = 0.95)
+  sp_data <- bind_cols(sp_data, as_tibble(predictions))
+  
+  # E. Build the unified title
+  plot_title <- paste(sp, "| n =", nrow(sp_data), "|", p_label, "|", rate_label)
+  
+  # F. Build the Scatter Plot
+  p_lm <- ggplot(data = sp_data, aes(x = thermal_pos_index)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey20", linewidth = 0.8) +
+    geom_point(aes(y = slope, size = total_sampled_years), shape = 21, fill = "grey70", color = "black", alpha = 0.6) +
+    
+    geom_ribbon(aes(ymin = lwr, ymax = upr), fill = ribbon_color, alpha = 0.35) +
+    geom_line(aes(y = fit), color = "black", linewidth = 1.2) +
+    
+    theme_classic() +
+    labs(
+      title = plot_title,
+      x = "Thermal position",
+      y = "Slope (annual population change)",
+      size = "Sampled Years"
+    ) +
+    theme(
+      plot.title = element_text(face = "bold.italic", size = 13),
+      panel.grid.minor = element_blank(),
+      
+      legend.position = c(0.98, 0.98), 
+      legend.justification = c("right", "top"),
+      legend.background = element_rect(fill = "white", color = "grey50", linewidth = 0.3),
+      legend.margin = margin(t = 4, r = 6, b = 4, l = 6)
+    )
+  
+  # G. Export
+  safe_filename <- paste0(gsub("[^[:alnum:]]", "_", sp), "_specific_lm.pdf")
+  save_path <- file.path(lm_specific_dir, safe_filename)
+  
+  suppressMessages({
+    ggsave(filename = save_path, plot = p_lm, width = 7, height = 5, device = cairo_pdf)
+  })
+  
+  cat("Exported specific LM plot for:", sp, "\n")
+}
+```
+
+
+
+
+
+
