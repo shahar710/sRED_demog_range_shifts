@@ -286,7 +286,7 @@ cat("\nAll significant maps processed.\n")
 
 #3) Map candidates (World Globe)
 ```{r}
-# 1. Define the specific 3 species you want for this map
+# 1. Define the specific 3 species for this map
 target_hub_species <- c("Turdus merula", "Homarus americanus", "Oncorhynchus tshawytscha")
 
 # Build the spatial data directly from the raw dataset to guarantee all 3 are present
@@ -482,8 +482,190 @@ for (sp in target_species) {
 }
 ```
 
+#5) data panels
 
 
+```{r}
+# Load necessary libraries
+library(tidyverse)
+library(patchwork)
 
+# ==============================================================================
+# PANEL A: Taxonomic & Realm Distribution (Side-by-Side / Dodged)
+# ==============================================================================
 
+# 1. Prepare data and calculate total for y-axis sorting
+plot_data_A <- dataset_for_model %>%
+  count(class, Eco) %>%
+  group_by(class) %>%
+  mutate(total_n = sum(n)) %>%
+  ungroup() %>%
+  # Reorder class factor by the total count so the largest classes are at the top
+  mutate(class = fct_reorder(class, total_n))
 
+# 2. Build the Plot
+pA <- ggplot(plot_data_A, aes(x = n, y = class, fill = Eco)) +
+  
+  # position_dodge places the Marine and Terrestrial bars side-by-side
+  geom_col(
+    position = position_dodge(width = 0.8), 
+    color = "black", 
+    linewidth = 0.25, 
+    width = 0.8
+  ) +
+  
+  # Add the exact count label at the end of EACH individual bar
+  geom_text(
+    aes(label = scales::comma(n)),
+    position = position_dodge(width = 0.8),
+    hjust = -0.2,
+    size = 2.5
+  ) +
+  
+  # Apply the log10 scale to the x-axis
+  scale_x_log10(
+    labels = scales::comma,
+    breaks = c(1, 10, 100, 1000, 5000),
+    limits = c(1, 12000), # Increased limit slightly to ensure all dodged text fits
+    expand = c(0, 0)
+  ) +
+  
+  # Apply the color scheme
+  scale_fill_manual(
+    values = c("Mar" = "dodgerblue", "Ter" = "forestgreen"),
+    labels = c("Mar" = "Marine", "Ter" = "Terrestrial"),
+    name = "Realm"
+  ) +
+  
+  theme_classic() +
+  labs(
+    title = "Realm and taxonomic coverage",
+    x = "Number of populations (log scale)",
+    y = NULL 
+  ) +
+  theme(
+    plot.title = element_text(face = "plain", size = 12),
+    axis.text.y = element_text(size = 7), 
+    legend.position = "bottom",
+    legend.title = element_text(face = "plain", size = 9),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    # Add light gridlines to make the log axis easier to track visually
+    panel.grid.major.x = element_line(color = "grey90", linetype = "dotted") 
+  )
+
+print(pA)
+# --- Quality Check: Visual vs. Actual Total ---
+qa_check <- dataset_for_model %>%
+  count(class, Eco) %>%
+  group_by(class) %>%
+  summarise(
+    max_single_realm = max(n),    # Where the visual bar will actually end
+    true_total = sum(n),          # Where the text label will be placed
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # Calculate how much of the bar is "missing" visually
+    percent_hidden = (true_total - max_single_realm) / true_total * 100
+  ) %>%
+  arrange(desc(percent_hidden))
+
+head(qa_check, 10)
+# ==============================================================================
+# PANEL B: Time-Series Quality & Model Fallback
+# ==============================================================================
+pB <- ggplot(dataset_for_model, aes(x = total_sampled_years, fill = model_type)) +
+  geom_histogram(binwidth = 3, color = "black", linewidth = 0.2) +
+  scale_fill_viridis_d(option = "plasma", name = "Fitted model") +
+  scale_x_continuous(breaks = seq(0, 150, by = 20), expand = c(0, 0)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_classic() +
+  labs(
+    title = "Temporal effort and used models",
+    x = "Total sampled years",
+    y = "Count"
+  ) +
+  theme(
+    plot.title = element_text(face = "plain", size = 12),
+    legend.position = c(0.75, 0.75), # Inset legend to save space
+    legend.background = element_rect(fill = "white", color = "black", linewidth = 0.3),
+    legend.title = element_text(face = "plain", size = 9),
+    legend.text = element_text(size = 8)
+  )
+pB
+# ==============================================================================
+# PANEL C: The Thermal Gradient
+# ==============================================================================
+# Extract precise density coordinates to build a perfect gradient fill
+dens <- density(dataset_for_model$thermal_pos_index, na.rm = TRUE)
+dens_df <- data.frame(x = dens$x, y = dens$y)
+
+pC <- ggplot(dens_df, aes(x = x, y = y)) +
+  # Use geom_segment to draw vertical lines from 0 to the density curve, colored by X
+  geom_segment(aes(xend = x, yend = 0, color = x), linewidth = 1) +
+  geom_line(color = "NA", linewidth = 0.5) + # Add crisp top border
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
+  scale_color_gradient2(
+    low = "#3182bd", mid = "grey85", high = "#de2d26", midpoint = 0,
+    guide = "none" # Hide the color legend, the x-axis explains it
+  ) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_classic() +
+  labs(
+    title = "Thermal position",
+    x = "Thermal position index",
+    y = "Density"
+  ) +
+  theme(
+    plot.title = element_text(face = "plain", size = 12)
+  )
+pC
+# ==============================================================================
+# PANEL D: Population Trajectories (Slopes)
+# ==============================================================================
+pD <- ggplot(dataset_for_model, aes(x = slope, fill = Eco, weight = weight_capped)) +
+  geom_density(alpha = 0.6, color = "NA", linewidth = 0.4,adjust = 1.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
+  scale_fill_manual(
+    values = c("Mar" = "dodgerblue", "Ter" = "forestgreen"),
+    labels = c("Mar" = "Marine", "Ter" = "Terrestrial"), 
+    name = "Realm"
+  ) +
+  # Zoom in on the bulk of the data without removing outliers from the calculation
+  coord_cartesian(xlim = c(-0.25, 0.25)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_classic() +
+  labs(
+    title = "Population slopes",
+    x = "Slope (annual Change)",
+    y = "Density"
+  ) +
+  theme(
+    plot.title = element_text(face = "plain", size = 12),
+    legend.position = c(0.85, 0.8),
+    legend.background = element_rect(fill = "white", color = "black", linewidth = 0.3),
+    legend.title = element_text(face = "plain", size = 9)
+  )
+pD
+# ==============================================================================
+# COMBINE AND SAVE (Patchwork)
+# ==============================================================================
+# Layout: Top row (A, B), Bottom row (C, D)
+final_methods_figure <- (pA | pB) / (pC | pD) + 
+  plot_annotation(tag_levels = 'A') & 
+  theme(plot.tag = element_text(face = "bold", size = 16))
+
+# Print to viewer
+print(final_methods_figure)
+
+# Save as a high-res PDF for the manuscript
+ggsave(
+  filename = "./stage_8_proof_of_con/Figure_2_Methods_Overview.png",
+  plot = final_methods_figure,
+  width = 10,
+  height = 8,
+  dpi = 300,
+  device = "jpeg" # Prevents any text rendering issues
+)
+```
