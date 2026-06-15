@@ -37,7 +37,7 @@ Here, we load the harmonized dataset and isolate the latitudinal shifts. We also
 ```{r data_prep}
 # 1. Load the Thermal Position Index
 thermal_data <- read_rds("./stage_6_thermal_position/thermal_pos_all_ecos.rds") %>%
-  dplyr::select(unique_pop_id, thermal_pos_index)
+  dplyr::select(unique_pop_id, thermal_pos_index, thermal_range)
 
 # 2. Prepare and properly format the dataset for the model
 dataset_for_model <- read_rds("./stage_4_bind_biotime_bioshifts/master_population_slopes.rds") %>%
@@ -69,7 +69,7 @@ dataset_for_model <- read_rds("./stage_4_bind_biotime_bioshifts/master_populatio
   ) %>% 
   ungroup()
 
-#write_rds(dataset_for_model,"./stage_7_models/dataset_for_model.rds")
+saveRDS(dataset_for_model,"./stage_7_models/dataset_for_model.rds")
 ```
 
 ## 3.Modeling
@@ -144,7 +144,7 @@ dev.off()
 
 cat("Zoomed QQ Plot saved!\n")
 
-sjPlot::plot_model(final_eco_model,type="pred",terms=c("Rate","thermal_pos_index[-1,1]","Eco"))
+#sjPlot::plot_model(final_eco_model,type="pred",terms=c("Rate","thermal_pos_index[-1,1]","Eco"))
 ```
 
 ###3.2 summary table
@@ -608,5 +608,42 @@ plot_sensitivity <- ggplot(predicted_sens, aes(x = x, y = predicted)) +
   )
 
 print(plot_sensitivity)
+```
+
+#6) Phlogeny random effects
+```{r}
+#cleaned data with no taxonomy NAs
+dataset_for_model_clean <- dataset_for_model %>% 
+  drop_na()
+
+final_eco_model_tax <- glmmTMB(
+  
+  slope ~ scale(Rate) * Eco * scale(thermal_pos_index) + 
+    
+    # THE PHYLOGENETIC PROXY: Nested taxonomy
+    (1 | class  ) + 
+    (1 |species_harmonized)+
+    (1 | h3_id) + 
+    (1 | ID_BioShifts),
+  
+  data = dataset_for_model_clean,
+  weights = weight_years, 
+  family = t_family(),
+  
+  control = glmmTMBControl(
+    optCtrl = list(iter.max = 10000, eval.max = 10000)
+  )
+)
+
+#diagnostics
+check_convergence(final_eco_model_tax)
+check_collinearity(final_eco_model_tax)
+check_singularity(final_eco_model_tax)
+sim_res <- simulateResiduals(fittedModel = final_eco_model_tax, plot = TRUE,n = 70)
+
+
+#saveRDS(final_eco_model_tax,"./stage_7_models/final_eco_model_tax.rds")
+summary(final_eco_model_tax)
+r.squaredGLMM(final_eco_model_tax)
 ```
 
